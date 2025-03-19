@@ -34,6 +34,7 @@ pub mod pre_fetch;
 pub mod processor_service;
 pub mod stage;
 pub mod stage_reader;
+pub mod streaming;
 pub mod util;
 
 #[pymodule]

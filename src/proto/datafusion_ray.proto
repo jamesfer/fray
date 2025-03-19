@@ -47,3 +47,10 @@ message FlightTicketData {
   uint64 partition = 2;
 }
 
+// TODO
+message StreamingFlightTicketData {
+  // stage id of the stream
+  bool dummy = 1;
+  // partition id of the stream
+  uint64 partition = 2;
+}
