@@ -21,15 +21,15 @@ use std::error::Error;
 use std::sync::Arc;
 
 use arrow::array::RecordBatch;
+use arrow::error::ArrowError;
 use arrow_flight::FlightClient;
-use arrow_flight::encode::FlightDataEncoderBuilder;
 use arrow_flight::error::FlightError;
 use datafusion::common::internal_datafusion_err;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_python::utils::wait_for_future;
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, TryStreamExt, StreamExt};
 use local_ip_address::local_ip;
 use log::{debug, error, info, trace};
 use tokio::net::TcpListener;
@@ -40,73 +40,62 @@ use tonic::{Request, Response, Status, async_trait};
 use datafusion::error::Result as DFResult;
 
 use arrow_flight::{Ticket, flight_service_server::FlightServiceServer};
-
+use bytes::Bytes;
 use pyo3::prelude::*;
 
 use parking_lot::{Mutex, RwLock};
-
+use prost::Message;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-
 use crate::flight::{FlightHandler, FlightServ};
 use crate::isolator::PartitionGroup;
+use crate::protobuf::StreamingFlightTicketData;
+use crate::streaming::output_manager::OutputManager;
+use crate::streaming::serialization::{FlightDataEncoderBuilder, FlightDataItem};
+use crate::streaming::task_definition::TaskDefinition;
+use crate::streaming::task_runner::TaskRunner;
 use crate::util::{
     ResultExt, bytes_to_physical_plan, display_plan_with_partition_counts, extract_ticket,
     input_stage_ids, make_client, register_object_store_for_paths_in_plan,
 };
+
 
 /// a map of stage_id, partition to a list FlightClients that can serve
 /// this (stage_id, and partition).   It is assumed that to consume a partition, the consumer
 /// will consume the partition from all clients and merge the results.
 pub(crate) struct ServiceClients(pub HashMap<(usize, usize), Mutex<Vec<FlightClient>>>);
 
-/// DFRayProcessorHandler is a [`FlightHandler`] that serves streams of partitions from a hosted Physical Plan
-/// It only responds to the DoGet Arrow Flight method.
-struct DFRayStreamingProcessorHandler {
-    /// our name, useful for logging
-    name: String,
-    /// Inner state of the handler
-    inner: RwLock<Option<DFRayStreamingTaskExecutor>>,
-}
-
 struct DFRayStreamingTaskExecutor {
-    /// the physical plan that comprises our stage
-    pub(crate) plan: Arc<dyn ExecutionPlan>,
-    pub(crate) output_stream_address_map: HashMap<String, String>,
-    /// the session context we will use to execute the plan
-    // pub(crate) ctx: SessionContext,
-}
-
-impl DFRayStreamingProcessorHandler {
-    pub fn new(name: String) -> Self {
-        let inner = RwLock::new(None);
-
-        Self { name, inner }
-    }
-
-    async fn run_task(
-        &self,
-        stage_id: usize,
-        output_stream_address_map: HashMap<String, String>,
-        plan: Arc<dyn ExecutionPlan>,
-    ) -> DFResult<()> {
-        let inner = DFRayStreamingTaskExecutor::new(stage_id, output_stream_address_map, plan).await?;
-
-        // Wait to start the executor until we can acquire the lock
-        let mut inner_ref = &*self.inner.write();
-        inner.start().await;
-        inner_ref.replace(inner);
-
-        Ok(())
-    }
+    stage_id: usize,
+    output_stream_address_map: HashMap<String, String>,
+    task_runner: TaskRunner,
 }
 
 impl DFRayStreamingTaskExecutor {
-    pub async fn new(
+    pub fn start(
         stage_id: usize,
         output_stream_address_map: HashMap<String, String>,
-        plan: Arc<dyn ExecutionPlan>,
-    ) -> DFResult<Self> {
-        Ok(Self { plan, output_stream_address_map })
+        task_definition: TaskDefinition,
+        output_manager: Arc<OutputManager>,
+    ) -> Self {
+        let task_runner = TaskRunner::start(
+            format!("stage_{}", stage_id),
+            task_definition.function,
+            task_definition.inputs,
+            task_definition.output_stream_id,
+            task_definition.output_schema,
+            task_definition.output_partitioning,
+            task_definition.checkpoint_id,
+            None,
+            input_manager,
+            output_manager,
+            checkpoint_storage_manager,
+        );
+
+        Self {
+            stage_id,
+            output_stream_address_map,
+            task_runner,
+        }
     }
 
     // async fn configure_ctx(
@@ -172,25 +161,72 @@ impl DFRayStreamingTaskExecutor {
     // }
 }
 
-fn make_stream(
-    inner: &DFRayStreamingTaskExecutor,
-    partition: usize,
-) -> Result<impl Stream<Item = Result<RecordBatch, FlightError>> + Send + 'static, Status> {
-    let task_ctx = inner.ctx.task_ctx();
+/// DFRayProcessorHandler is a [`FlightHandler`] that serves streams of partitions from a hosted Physical Plan
+/// It only responds to the DoGet Arrow Flight method.
+struct DFRayStreamingProcessorHandler {
+    /// our name, useful for logging
+    name: String,
+    /// Inner state of the handler
+    inner: RwLock<Option<DFRayStreamingTaskExecutor>>,
+    /// Output channels
+    output_manager: Arc<OutputManager>,
+}
 
-    let stream = inner
-        .plan
-        .execute(partition, task_ctx)
-        .inspect_err(|e| {
-            error!(
-                "{}",
-                format!("Could not get partition stream from plan {e}")
-            )
-        })
-        .map_err(|e| Status::internal(format!("Could not get partition stream from plan {e}")))?
-        .map_err(|e| FlightError::from_external_error(Box::new(e)));
+impl DFRayStreamingProcessorHandler {
+    pub fn new(name: String) -> Self {
+        let inner = RwLock::new(None);
 
-    Ok(stream)
+        Self {
+            name,
+            inner,
+            output_manager: Arc::new(OutputManager::new()),
+        }
+    }
+
+    async fn run_task(
+        &self,
+        stage_id: usize,
+        output_stream_address_map: HashMap<String, String>,
+        task_definition: TaskDefinition,
+    ) -> DFResult<()> {
+        // Wait to start the executor until we can acquire the lock
+        let mut inner_ref = &*self.inner.write();
+        let inner = DFRayStreamingTaskExecutor::start(
+            stage_id,
+            output_stream_address_map,
+            task_definition,
+            self.output_manager.clone(),
+        ).await?;
+        inner_ref.replace(inner);
+
+        Ok(())
+    }
+
+    fn extract_ticket(ticket: Ticket) -> anyhow::Result<StreamingFlightTicketData> {
+        let data = ticket.ticket;
+
+        let tic = StreamingFlightTicketData::decode(data)?;
+        Ok(tic)
+    }
+
+    async fn make_stream(
+        &self,
+        ticket: StreamingFlightTicketData,
+    ) -> Result<impl Stream<Item = Result<FlightDataItem, ArrowError>> + Send + 'static, Status> {
+        let action_stream = self.output_manager.stream_output(&ticket.stream_id, ticket.partition as usize, None)
+            .await
+            .map_err(|_| Status::internal("Could not stream output"))?
+            .map(|stream_result| {
+                match stream_result {
+                    Ok(StreamItem::RecordBatch(record_batch)) => Ok(FlightDataItem::RecordBatch(record_batch)),
+                    Ok(StreamItem::Marker(marker)) => Ok(FlightDataItem::AppMetadata(Bytes::from(marker.checkpoint_number.to_be_bytes()))),
+                    Err(err) => Err(ArrowError::from_external_error(Box::new(err))),
+                }
+            });
+
+        Ok(action_stream)
+    }
+
 }
 
 #[async_trait]
@@ -206,7 +242,7 @@ impl FlightHandler for DFRayStreamingProcessorHandler {
 
         let ticket = request.into_inner();
 
-        let partition = extract_ticket(ticket).map_err(|e| {
+        let ticket = Self::extract_ticket(ticket).map_err(|e| {
             Status::internal(format!(
                 "{}, Unexpected error extracting ticket {e}",
                 self.name
@@ -214,17 +250,12 @@ impl FlightHandler for DFRayStreamingProcessorHandler {
         })?;
 
         trace!(
-            "{}, request for partition {} from {}",
-            self.name, partition, remote_addr
+            "{}, request for stream {} partition {} from {}",
+            self.name, ticket.stream_id, ticket.partition, remote_addr
         );
 
         let name = self.name.clone();
-        let stream = self
-            .inner
-            .read()
-            .as_ref()
-            .map(|inner| make_stream(inner, partition))
-            .ok_or_else(|| Status::internal(format!("{} No inner found", &name)))??;
+        let stream = self.make_stream(ticket).await?;
 
         let out_stream = FlightDataEncoderBuilder::new()
             .build(stream)
@@ -236,7 +267,7 @@ impl FlightHandler for DFRayStreamingProcessorHandler {
     }
 }
 
-/// DFRayProcessorService is a Arrow Flight service that serves streams of
+/// DFRayProcessorService is an Arrow Flight service that serves streams of
 /// partitions from a hosted Physical Plan
 ///
 /// It only responds to the DoGet Arrow Flight method
@@ -341,7 +372,7 @@ impl DFRayStreamingProcessorService {
         let name = self.name.clone();
         let fut = async move {
             handler
-                .run_task(stage_id, stage_addrs, plan)
+                .run_task(stage_id, output_stream_address_map, plan)
                 .await
                 .to_py_err()?;
             info!(

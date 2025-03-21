@@ -1,0 +1,225 @@
+use crate::task_definition::TaskDefinition;
+use crate::tasks::task_functions::FilterTask;
+use crate::utils::task_def_builder::TaskDefBuilder;
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion::error::DataFusionError;
+use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
+use datafusion::physical_plan::filter::FilterExec;
+use datafusion::physical_plan::values::ValuesExec;
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::prelude::SessionContext;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use datafusion::physical_plan::projection::ProjectionExec;
+use crate::tasks::projection::ProjectionTask;
+
+// A kind of hacky way to uniquely identify Arc values
+struct Holder<T: ?Sized> {
+    pointer: usize,
+    arc: Arc<T>,
+}
+
+impl <T: ?Sized> Holder<T> {
+    fn new(arc: Arc<T>) -> Self {
+        Self {
+            pointer: Arc::as_ptr(&arc) as *const () as usize,
+            arc,
+        }
+    }
+}
+
+impl <T: ?Sized> Hash for Holder<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_usize(self.pointer);
+    }
+}
+
+impl<T: ?Sized> PartialEq<Self> for Holder<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.pointer == other.pointer
+    }
+}
+
+impl <T: ?Sized> Eq for Holder<T> {}
+
+enum TaskConversion {
+    Converted(String),
+    Skipped(String),
+}
+
+impl TaskConversion {
+    fn get_id(&self) -> &str {
+        match self {
+            TaskConversion::Converted(id) => id,
+            TaskConversion::Skipped(id) => id,
+        }
+    }
+}
+
+struct Visitor {
+    node_lookup: HashMap<Holder<dyn ExecutionPlan>, TaskConversion>,
+    tasks: HashMap<String, TaskDefinition>,
+}
+
+impl Visitor {
+    fn new() -> Self {
+        Self {
+            node_lookup: HashMap::new(),
+            tasks: HashMap::new(),
+        }
+    }
+
+    fn into_tasks(self) -> impl Iterator<Item = TaskDefinition> {
+        self.tasks.into_values()
+    }
+
+    fn get_converted_task(&mut self, exec_node: &Arc<dyn ExecutionPlan>) -> Result<&TaskDefinition, DataFusionError> {
+        let conversion_result = self.node_lookup.get(&Holder::new(Arc::clone(exec_node)))
+            .ok_or_else(|| DataFusionError::Internal("Input not found".to_string()))?;
+        let converted_task = self.tasks.get(conversion_result.get_id())
+            .ok_or_else(|| DataFusionError::Internal("Input task not found".to_string()))?;
+        Ok(converted_task)
+    }
+}
+
+#[macro_export]
+macro_rules! downcast_match {
+    ( $x:expr, $( $t:ty : $i:ident -> $b:block ),+, default: $fallback:block) => {
+        {
+            $(
+                if let Some($i) = $x.downcast_ref::<$t>() {
+                    $b
+                } else
+            )*
+            {
+                $fallback
+            }
+        }
+    };
+}
+
+// downcast_match!{
+//             any_node,
+//             FilterExec: filter_exec -> {
+//                 // Validate
+//                 if filter_exec.projection().is_some() {
+//                     return Err(DataFusionError::Internal("FilterExec cannot have a projection".to_string()));
+//                 }
+//
+//                 let converted_input = self.node_lookup.get(&Holder::new(Arc::clone(filter_exec.input())))
+//                     .ok_or_else(|| DataFusionError::Internal("Input not found".to_string()))?;
+//                 let input_id = converted_input.get_id();
+//                 let input_task = self.tasks.get(input_id)
+//                     .ok_or_else(|| DataFusionError::Internal("Input task not found".to_string()))?;
+//
+//                 let self_id = "abcd"; // TODO
+//                 let task = TaskDefBuilder::new(filter_exec.schema())
+//                     .id(self_id)
+//                     .function(Box::new(FilterTask::new(Arc::clone(filter_exec.predicate()))))
+//                     .input_address("__PLACEHOLDER__", input_task.output_stream_id.clone())
+//                     .build();
+//
+//                 self.tasks.insert(self_id.to_string(), task);
+//                 self.node_lookup.insert(Holder::new(node.clone()), TaskConversion::Converted(self_id.to_string()));
+//             },
+//             default: {
+//                 return Err(DataFusionError::Internal(format!("Unsupported exec node: {}", node.name())));
+//             }
+//         }
+
+impl TreeNodeVisitor<'_> for Visitor {
+    type Node = Arc<dyn ExecutionPlan>;
+
+    fn f_up(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion, DataFusionError> {
+        let any_node = node.as_any();
+
+        let conversion_result = if let Some(filter_exec) = any_node.downcast_ref::<FilterExec>() {
+            // Validate
+            if filter_exec.projection().is_some() {
+                return Err(DataFusionError::Internal("FilterExec cannot have a projection".to_string()));
+            }
+
+            let input_task = self.get_converted_task(filter_exec.input())?;
+
+            let self_id = "filter-abcd"; // TODO
+            let task = TaskDefBuilder::new(filter_exec.schema())
+                .id(self_id)
+                .function(Box::new(FilterTask::new(Arc::clone(filter_exec.predicate()))))
+                .input_address("__PLACEHOLDER__", input_task.output_stream_id.clone())
+                .build();
+
+            self.tasks.insert(self_id.to_string(), task);
+            TaskConversion::Converted(self_id.to_string())
+        } else if let Some(values_exec) = any_node.downcast_ref::<ValuesExec>() {
+            let self_id = "values"; // TODO
+            let task = TaskDefBuilder::source(values_exec.data())
+                .id(self_id)
+                .build();
+
+            self.tasks.insert(self_id.to_string(), task);
+            TaskConversion::Converted(self_id.to_string())
+        } else if let Some(coalesce_batches_exec) = any_node.downcast_ref::<CoalesceBatchesExec>() {
+            let input_task = self.get_converted_task(coalesce_batches_exec.input())?;
+            TaskConversion::Skipped((&input_task.id).clone())
+        } else if let Some(projection_exec) = any_node.downcast_ref::<ProjectionExec>() {
+            let input_task = self.get_converted_task(projection_exec.input())?;
+
+            let self_id = "projection-abcd"; // TODO
+            let expressions = projection_exec.expr().iter().map(|(expr, _name)| expr.clone()).collect();
+            let task = TaskDefBuilder::new(projection_exec.schema())
+                .id(self_id)
+                .function(Box::new(ProjectionTask::new(projection_exec.input().schema(), expressions)))
+                .input_address("__PLACEHOLDER__", input_task.output_stream_id.clone())
+                .build();
+
+            self.tasks.insert(self_id.to_string(), task);
+            TaskConversion::Converted(self_id.to_string())
+        } else {
+            return Err(DataFusionError::Internal(format!("Unsupported exec node: {}", node.name())));
+        };
+
+        self.node_lookup.insert(Holder::new(node.clone()), conversion_result);
+        Ok(TreeNodeRecursion::Continue)
+    }
+}
+
+pub fn translate_physical_plan(plan: &Arc<dyn ExecutionPlan>) -> Result<Vec<TaskDefinition>, DataFusionError> {
+    let mut visitor = Visitor::new();
+    plan.visit(&mut visitor)?;
+    Ok(visitor.into_tasks().collect())
+}
+
+async fn create_physical_datafusion_plan(sql: &str) -> Arc<dyn ExecutionPlan> {
+    let context = SessionContext::new();
+    let logical_plan = context.state().create_logical_plan(sql).await.unwrap();
+    context.state().create_physical_plan(&logical_plan).await.unwrap()
+}
+
+pub async fn translate_sql_to_tasks(sql: &str) -> Vec<TaskDefinition> {
+    let physical_plan = create_physical_datafusion_plan(sql).await;
+    translate_physical_plan(&physical_plan).unwrap()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use crate::translation::translate_physical_plan::{create_physical_datafusion_plan, translate_physical_plan};
+    use datafusion::physical_plan::displayable;
+
+    #[tokio::test]
+    async fn can_translate_simple_query() {
+        let sql = "
+            select *
+            from values (1), (2), (3)
+            where \"column1\" > 2
+        ";
+
+        let physical_plan = create_physical_datafusion_plan(sql).await;
+        println!("Plan: {}", displayable(physical_plan.as_ref()).indent(true));
+
+        let tasks = translate_physical_plan(&physical_plan).unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+}
