@@ -7,3 +7,4 @@ venv
 results-sf*
 data
 tpch/tpch-dbgen
+*.iml

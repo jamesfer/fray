@@ -1,16 +1,16 @@
+use crate::streaming::output_manager::OutputSlotPartitioning;
+use crate::streaming::task_definition::{TaskDefinition, TaskInputDefinition, TaskInputPhase, TaskInputStream, TaskInputStreamAddress, TaskInputStreamGeneration, TaskSpec};
+use crate::streaming::tasks::source::{SourceOperator, SourceTask};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
-use rand::{random, thread_rng, Rng};
-use crate::output_manager::OutputSlotPartitioning;
-use crate::task_definition::{TaskDefinition, TaskInputDefinition, TaskInputPhase, TaskInputStream, TaskInputStreamAddress, TaskInputStreamGeneration};
-use crate::task_function::TaskFunction;
-use crate::tasks::task_functions::{IdentityTask, SourceTask};
+use rand::{random, Rng};
+use crate::streaming::tasks::identity::{IdentityOperator, IdentityTask};
 
 pub struct TaskDefBuilder {
     // Required
     output_schema: SchemaRef,
     // Optional
-    function: Option<Box<dyn TaskFunction + Send + Sync>>,
+    spec: Option<TaskSpec>,
     id: Option<String>,
     checkpoint_id: Option<String>,
     output_stream_id: Option<String>,
@@ -24,7 +24,7 @@ impl TaskDefBuilder {
     ) -> Self {
         Self {
             output_schema,
-            function: None,
+            spec: None,
             id: None,
             checkpoint_id: None,
             output_stream_id: None,
@@ -39,7 +39,8 @@ impl TaskDefBuilder {
 
     pub fn source(record_batches: Vec<RecordBatch>) -> Self {
         let schema = record_batches[0].schema();
-        Self::new(schema).function(Box::new(SourceTask::new(record_batches)))
+        // TODO
+        Self::new(schema).spec(TaskSpec::Source(SourceOperator::new(record_batches)))
     }
 
     pub fn id<S: Into<String>>(mut self, id: S) -> Self {
@@ -47,8 +48,8 @@ impl TaskDefBuilder {
         self
     }
 
-    pub fn function(mut self, function: Box<dyn TaskFunction + Send + Sync>) -> Self {
-        self.function = Some(function);
+    pub fn spec(mut self, task_spec: TaskSpec) -> Self {
+        self.spec = Some(task_spec);
         self
     }
 
@@ -73,13 +74,14 @@ impl TaskDefBuilder {
     }
 
     // Single phase, single generation, single input stream, single address, single partition
-    pub fn input_address<S1: Into<String>, S2: Into<String>>(mut self, address: S1, stream_id: S2) -> Self {
+    pub fn input_address<S1: Into<String>, S2: Into<String>>(mut self, address: S1, stream_id: S2, schema: SchemaRef) -> Self {
         self.inputs = Some(TaskInputDefinition {
             phases: vec![TaskInputPhase {
                 generations: vec![TaskInputStreamGeneration {
                     transition_after: 0,
                     partition_range: vec![0],
                     streams: vec![TaskInputStream {
+                        input_schema: schema,
                         ordinal: 0,
                         addresses: vec![TaskInputStreamAddress {
                             address: address.into(),
@@ -97,7 +99,8 @@ impl TaskDefBuilder {
         TaskDefinition {
             id: id.clone(),
             checkpoint_id: self.checkpoint_id.unwrap_or_else(|| format!("checkpoint-{}", id)),
-            function: self.function.unwrap_or_else(|| Box::new(IdentityTask)),
+            // TODO
+            spec: self.spec.unwrap_or_else(|| TaskSpec::Identity(IdentityOperator)),
             output_stream_id: self.output_stream_id.unwrap_or_else(|| format!("output-stream-{}", id)),
             output_schema: self.output_schema,
             output_partitioning: self.output_partitioning.unwrap_or(None),

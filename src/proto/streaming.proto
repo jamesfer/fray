@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package datafusion_ray.protobuf.streaming;
+
+import "datafusion_common.proto";
+import "datafusion.proto";
+
+message StreamingFlightTicketData {
+  // output stream id
+  string stream_id = 1;
+  // partition id of the stream
+  uint64 partition = 2;
+}
+
+message Marker {
+  uint64 checkpoint_number = 1;
+}

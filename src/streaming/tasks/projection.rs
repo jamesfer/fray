@@ -1,19 +1,81 @@
-use std::sync::Arc;
+use crate::proto::generated::streaming_tasks as proto;
+use crate::streaming::action_stream::StreamItem;
+use crate::streaming::tasks::serialization::{ProtoSerializer, P};
+use crate::streaming::tasks::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::common::{internal_datafusion_err, DataFusionError};
 use datafusion::physical_expr::PhysicalExprRef;
 use datafusion::physical_plan::streaming_operators::projection::ProjectionStreamingTask;
-use crate::action_stream::StreamItem;
-use crate::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
+use datafusion::prelude::SessionContext;
+use std::sync::Arc;
+use async_trait::async_trait;
 
-pub struct ProjectionTaskSpec {
-    schema: SchemaRef,
-    expressions: Vec<PhysicalExprRef>
+#[derive(Clone)]
+pub struct ProjectionExpression {
+    pub expression: PhysicalExprRef,
+    pub alias: String,
 }
 
-impl Into<Box<dyn TaskFunction + Sync + Send>> for ProjectionTaskSpec {
-    fn into(self) -> Box<dyn TaskFunction + Sync + Send> {
-        Box::new(ProjectionTask::new(self.schema, self.expressions))
+impl ProtoSerializer for ProjectionExpression {
+    type ProtoType = proto::ProjectionExpression;
+    type SerializerContext<'a> = ();
+    type DeserializerContext<'a> = (&'a SessionContext, &'a Schema);
+
+    fn try_into_proto(self, context: &Self::SerializerContext<'_>) -> Result<Self::ProtoType, DataFusionError> {
+        Ok(Self::ProtoType {
+            expression: Some(self.expression.try_into_proto(context)?),
+            alias: self.alias,
+        })
+    }
+
+    fn try_from_proto(proto: Self::ProtoType, context: &Self::DeserializerContext<'_>) -> Result<Self, DataFusionError> {
+        Ok(Self {
+            expression: proto.expression
+                .ok_or(internal_datafusion_err!("Expression is required for ProjectionExpression"))?
+                .try_from_proto(context)?,
+            alias: proto.alias,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct ProjectionOperator {
+    pub schema: SchemaRef,
+    pub expressions: Vec<ProjectionExpression>,
+}
+
+impl ProjectionOperator {
+    pub fn into_function(self) -> ProjectionTask {
+        ProjectionTask::new(
+            self.expressions.into_iter().map(|expr| (expr.expression, expr.alias)).collect(),
+            self.schema,
+        )
+    }
+}
+
+impl ProtoSerializer for ProjectionOperator {
+    type ProtoType = proto::ProjectionOperator;
+    type SerializerContext<'a> = ();
+    type DeserializerContext<'a> = SessionContext;
+
+    fn try_into_proto(self, context: &Self::SerializerContext<'_>) -> Result<Self::ProtoType, DataFusionError> {
+        Ok(Self::ProtoType {
+            input_schema: Some(self.schema.try_into_proto(context)?),
+            expressions: self.expressions.try_into_proto(context)?,
+        })
+    }
+
+    fn try_from_proto(proto: Self::ProtoType, context: &Self::DeserializerContext<'_>) -> Result<Self, DataFusionError> {
+        let input_schema: SchemaRef = proto.input_schema
+            .ok_or(internal_datafusion_err!("Schema is required for ProjectionOperator"))?
+            .try_from_proto(&())?;
+        let context = (context, input_schema.as_ref());
+        let expressions = proto.expressions.try_from_proto(&context)?;
+        Ok(Self {
+            schema: input_schema,
+            expressions,
+        })
     }
 }
 
@@ -22,13 +84,14 @@ pub struct ProjectionTask {
 }
 
 impl ProjectionTask {
-    pub fn new(schema: SchemaRef, expressions: Vec<PhysicalExprRef>) -> Self {
+    pub fn new(expressions: Vec<(PhysicalExprRef, String)>, input_schema: SchemaRef) -> Self {
         Self {
-            inner: ProjectionStreamingTask::new(schema, expressions),
+            inner: ProjectionStreamingTask::new(expressions, input_schema).unwrap(),
         }
     }
 }
 
+#[async_trait]
 impl TaskFunction for ProjectionTask {
     async fn init(&mut self) {}
 
@@ -49,3 +112,25 @@ impl TaskFunction for ProjectionTask {
 
     async fn load_state(&mut self, _state: RecordBatch) {}
 }
+
+// impl TryFromProto<ProjectionTaskSpec> for ProjectionTask {
+//     type Error = DataFusionError;
+//
+//     fn try_from_proto(session_context: &SessionContext, proto: ProjectionTaskSpec) -> Result<Self, Self::Error> {
+//         let input_schema = proto.input_schema.ok_or(internal_datafusion_err!("Schema is required for ProjectionTask"))?;
+//         let schema_ref: SchemaRef = input_schema.try_into()?;
+//         let expressions = proto.expressions.into_iter()
+//             .map(|expr| {
+//                 let physical_expr = parse_physical_expr(
+//                     &expr.expression.ok_or(internal_datafusion_err!("Expression is required for ProjectionTask"))?,
+//                     session_context,
+//                     schema_ref.as_ref(),
+//                     &RayCodec {},
+//                 )?;
+//                 Ok((physical_expr, expr.alias))
+//             })
+//             .collect::<Result<Vec<_>, _>>()?;
+//
+//         Ok(Self::new(expressions, schema_ref))
+//     }
+// }

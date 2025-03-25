@@ -20,7 +20,9 @@ use std::path::Path;
 fn main() -> Result<(), String> {
     use std::io::Write;
 
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let in_dir = std::path::PathBuf::from("src/proto");
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let destination_dir = std::path::PathBuf::from("src/proto/generated");
 
     // for use in docker build where file changes can be wonky
     println!("cargo:rerun-if-env-changed=FORCE_REBUILD");
@@ -28,31 +30,40 @@ fn main() -> Result<(), String> {
     let version = rustc_version::version().unwrap();
     println!("cargo:rustc-env=RUSTC_VERSION={version}");
 
-    let path = "src/proto/generated/protobuf.rs";
+    // Input file relative to in_dir, output file relative to out_dir, destination file relative to destination_dir
+    let proto_files = [
+        ("datafusion_ray.proto", "datafusion_ray.protobuf.rs", "protobuf.rs"),
+        ("streaming_tasks.proto", "datafusion_ray.protobuf.streaming_tasks.rs", "streaming_tasks.rs"),
+        ("streaming.proto", "datafusion_ray.protobuf.streaming.rs", "streaming.rs"),
+    ];
 
     // We don't include the proto files in releases so that downstreams
     // do not need to have PROTOC included
     if Path::new("src/proto/datafusion_ray.proto").exists() {
+        let input_files: Vec<_> = proto_files.iter()
+            .map(|(input_file, _, _)| in_dir.join(input_file))
+            .collect();
+
         println!("cargo:rerun-if-changed=src/proto/datafusion_common.proto");
         println!("cargo:rerun-if-changed=src/proto/datafusion.proto");
         println!("cargo:rerun-if-changed=src/proto/datafusion_ray.proto");
         tonic_build::configure()
             .extern_path(".datafusion", "::datafusion_proto::protobuf")
             .extern_path(".datafusion_common", "::datafusion_proto::protobuf")
-            .compile(&[
-                "src/proto/datafusion_ray.proto",
-                "src/proto/streaming_tasks.proto",
-            ], &["src/proto"])
+            .compile(&input_files, &[in_dir])
             .map_err(|e| format!("protobuf compilation failed: {e}"))?;
-        let generated_source_path = out.join("datafusion_ray.protobuf.rs");
-        let code = std::fs::read_to_string(generated_source_path).unwrap();
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(path)
-            .unwrap();
-        file.write_all(code.as_str().as_ref()).unwrap();
+
+        for (_, output_file, destination_file) in proto_files.iter() {
+            let output_source_path = out_dir.join(output_file);
+            let code = std::fs::read_to_string(output_source_path).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(destination_dir.join(destination_file))
+                .unwrap();
+            file.write_all(code.as_str().as_ref()).unwrap();
+        }
     }
 
     Ok(())

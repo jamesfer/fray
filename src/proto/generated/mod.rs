@@ -16,3 +16,5 @@
 // under the License.
 
 pub mod protobuf;
+pub mod streaming_tasks;
+pub mod streaming;

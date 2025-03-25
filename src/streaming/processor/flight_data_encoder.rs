@@ -18,7 +18,7 @@
 use std::{collections::VecDeque, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
 use arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions, UnionArray};
 use arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, UnionMode};
-use arrow::ipc::MessageHeader;
+use arrow::ipc::{MessageBuilder, MessageHeader, MetadataVersion};
 use arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator};
 use arrow_flight::{FlightData, FlightDescriptor, SchemaAsIpc};
 use datafusion::arrow::datatypes::SchemaRef;
@@ -31,6 +31,7 @@ use datafusion::arrow::error::Result;
 //
 // use arrow_schema::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, UnionMode};
 use bytes::Bytes;
+use flatbuffers::FlatBufferBuilder;
 use futures::{ready, stream::BoxStream, Stream, StreamExt};
 
 /// Creates a [`Stream`] of [`FlightData`]s from a
@@ -445,9 +446,19 @@ impl Stream for FlightDataEncoder {
                     }
                 }
                 Some(Ok(FlightDataItem::AppMetadata(bytes))) => {
+                    let mut fbb = FlatBufferBuilder::new();
+                    let mut message = MessageBuilder::new(&mut fbb);
+                    message.add_version(MetadataVersion::V5);
+                    message.add_header_type(MessageHeader::NONE);
+                    message.add_bodyLength(0);
+                    let data = message.finish();
+                    fbb.finish(data, None);
+                    let header = fbb.finished_data();
+
                     return Poll::Ready(Some(Ok(FlightData {
                         flight_descriptor: None,
-                        data_header: Bytes::copy_from_slice(&[MessageHeader::NONE.0]),
+                        data_header: Bytes::copy_from_slice(header),
+                        // data_header: Bytes::copy_from_slice(&[MessageHeader::NONE.0]),
                         app_metadata: bytes,
                         data_body: Default::default(),
                     })));

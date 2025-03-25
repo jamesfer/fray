@@ -2,17 +2,33 @@ use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::error::DataFusionError;
 use futures::stream::Fuse;
-use futures_core::Stream;
 use futures_util::StreamExt;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::ops::DerefMut;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use bytes::Buf;
+use futures::Stream;
+use prost::{DecodeError, Message};
+use crate::proto::generated::streaming as proto;
 
 #[derive(Clone)]
 pub struct Marker {
     pub checkpoint_number: u64,
+}
+
+impl Marker {
+    pub fn to_bytes(self) -> Vec<u8> {
+        proto::Marker { checkpoint_number: self.checkpoint_number }.encode_to_vec()
+    }
+
+    pub fn from_bytes(buffer: impl Buf) -> Result<Self, DecodeError> {
+        let proto_marker = proto::Marker::decode(buffer)?;
+        Ok(Self {
+            checkpoint_number: proto_marker.checkpoint_number,
+        })
+    }
 }
 
 #[derive(Clone)]

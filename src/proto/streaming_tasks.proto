@@ -1,10 +1,92 @@
 syntax = "proto3";
 
-package streaming_engine.protobuf.tasks;
+package datafusion_ray.protobuf.streaming_tasks;
 
-import "google/protobuf/any.proto";
+import "datafusion_common.proto";
+import "datafusion.proto";
 
-message ProjectionTaskSpec {
-  google.protobuf.Any schema = 1;
-  repeated google.protobuf.Any expressions = 2;
+message TaskInputStreamAddress {
+  string address = 1;
+  string stream_id = 2;
+}
+
+message TaskInputStream {
+  uint64 ordinal = 1;
+  repeated TaskInputStreamAddress addresses = 2;
+  datafusion_common.Schema input_schema = 3;
+}
+
+message TaskInputStreamGeneration {
+  repeated TaskInputStream streams = 1;
+  uint64 transition_after = 2;
+  repeated uint64 partition_range = 3;
+}
+
+message TaskInputPhase {
+  repeated TaskInputStreamGeneration generations = 1;
+}
+
+message TaskInputDefinition {
+  repeated TaskInputPhase phases = 2;
+}
+
+message RoundRobinPartitioning {}
+message HashPartitioning {}
+
+message OutputPartitionStrategy {
+  oneof strategy {
+    RoundRobinPartitioning round_robin = 1;
+    HashPartitioning hash = 2;
+  }
+}
+
+message OutputSlotPartitioning {
+  OutputPartitionStrategy strategy = 1;
+  uint64 total_partitions = 2;
+  repeated uint64 partition_range = 3;
+}
+
+message TaskDefinition {
+  string id = 1;
+  string checkpoint_id = 2;
+  TaskInputDefinition inputs = 3;
+  TaskSpec spec = 4;
+  string output_stream_id = 5;
+  datafusion_common.Schema output_schema = 6;
+  OutputSlotPartitioning output_partitioning = 7;
+}
+
+
+
+// Operators
+
+message ProjectionExpression {
+  datafusion.PhysicalExprNode expression = 1;
+  string alias = 2;
+}
+
+message ProjectionOperator {
+  // Needed to decode the expressions
+  datafusion_common.Schema input_schema = 1;
+  repeated ProjectionExpression expressions = 2;
+}
+
+message IdentityOperator {}
+
+message SourceOperator {
+  repeated bytes record_batches = 1;
+}
+
+message FilterOperator {
+  datafusion_common.Schema input_schema = 1;
+  datafusion.PhysicalExprNode expression = 2;
+}
+
+message TaskSpec {
+  oneof task {
+    ProjectionOperator projection = 1;
+    IdentityOperator identity = 2;
+    SourceOperator source = 3;
+    FilterOperator filter = 4;
+  }
 }

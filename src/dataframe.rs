@@ -25,7 +25,7 @@ use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
-use datafusion::physical_plan::displayable;
+use datafusion::physical_plan::{displayable, PlanProperties};
 use datafusion::physical_plan::joins::NestedLoopJoinExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
@@ -50,7 +50,9 @@ use crate::max_rows::MaxRowsExec;
 use crate::pre_fetch::PrefetchExec;
 use crate::stage::DFRayStageExec;
 use crate::stage_reader::DFRayStageReaderExec;
-use crate::util::ResultExt;
+use crate::streaming::task_definition::TaskDefinition;
+use crate::streaming::translation::translate_physical_plan::translate_physical_plan;
+use crate::util::{collect_from_stage_streaming, ResultExt};
 use crate::util::collect_from_stage;
 use crate::util::display_plan_with_partition_counts;
 use crate::util::physical_plan_to_bytes;
@@ -86,6 +88,36 @@ impl DFRayDataFrame {
 
 #[pymethods]
 impl DFRayDataFrame {
+    fn streaming_stages(
+        &mut self,
+        py: Python,
+    ) -> PyResult<Vec<PyDFRayStreamingStage>> {
+        // Translate the plan from datafusion into tasks
+        let physical_plan = wait_for_future(py, self.df.clone().create_physical_plan())?;
+        let tasks = translate_physical_plan(&physical_plan)?;
+
+        let stages = tasks.into_iter()
+            .enumerate()
+            .map(|(stage_id, task)| {
+                PyDFRayStreamingStage::new(
+                    stage_id,
+                    task.output_stream_id.clone(),
+                    task,
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let reader_plan = Arc::new(DFRayStageReaderExec::try_new_from_input(
+            physical_plan,
+            stages[0].stage_id,
+        )?) as Arc<dyn ExecutionPlan>;
+
+        self.final_plan = Some(reader_plan);
+
+        Ok(stages)
+    }
+
     #[pyo3(signature = (batch_size, prefetch_buffer_size, partitions_per_worker=None))]
     fn stages(
         &mut self,
@@ -261,6 +293,26 @@ impl DFRayDataFrame {
         .map(PyRecordBatchStream::new)
         .to_py_err()
     }
+
+    fn read_final_streaming_stage(
+        &mut self,
+        py: Python,
+        stage_id: usize,
+        address: &str,
+        output_stream_id: &str,
+    ) -> PyResult<PyRecordBatchStream> {
+        wait_for_future(
+            py,
+            collect_from_stage_streaming(
+                stage_id,
+                address,
+                output_stream_id,
+                self.df.schema().inner().clone(),
+            ),
+        )
+        .map(PyRecordBatchStream::new)
+        .to_py_err()
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -330,6 +382,7 @@ pub struct PyDFRayStage {
     /// CombinedRecordBatchStream
     full_partitions: bool,
 }
+
 impl PyDFRayStage {
     fn new(
         stage_id: usize,
@@ -395,6 +448,82 @@ impl PyDFRayStage {
     pub fn plan_bytes(&self) -> PyResult<Cow<[u8]>> {
         let plan_bytes = physical_plan_to_bytes(self.plan.clone())?;
         Ok(Cow::Owned(plan_bytes))
+    }
+}
+
+/// A Python class to hold a streaming plan
+#[pyclass]
+pub struct PyDFRayStreamingStage {
+    /// our stage id
+    stage_id: usize,
+    output_stream_id: String,
+    /// the physical plan of our stage
+    task: TaskDefinition,
+    /// Are we hosting the complete partitions?  If not
+    /// then RayStageReaderExecs will be inserted to consume its desired partition
+    /// from all stages with this same id, and merge the results.  Using a
+    /// CombinedRecordBatchStream
+    full_partitions: bool,
+}
+
+impl PyDFRayStreamingStage {
+    fn new(
+        stage_id: usize,
+        output_stream_id: String,
+        task: TaskDefinition,
+        full_partitions: bool,
+    ) -> Self {
+        Self {
+            stage_id,
+            output_stream_id,
+            task,
+            full_partitions,
+        }
+    }
+}
+
+#[pymethods]
+impl PyDFRayStreamingStage {
+    #[getter]
+    fn stage_id(&self) -> usize {
+        self.stage_id
+    }
+
+    #[getter]
+    fn output_stream_id(&self) -> String {
+        self.output_stream_id.clone()
+    }
+
+    #[getter]
+    fn full_partitions(&self) -> bool {
+        self.full_partitions
+    }
+
+    // /// returns the stage ids of that we need to read from in order to execute
+    // #[getter]
+    // pub fn child_stage_ids(&self) -> PyResult<Vec<usize>> {
+    //     let mut result = vec![];
+    //     self.plan
+    //         .clone()
+    //         .transform_down(|node: Arc<dyn ExecutionPlan>| {
+    //             if let Some(reader) = node.as_any().downcast_ref::<DFRayStageReaderExec>() {
+    //                 result.push(reader.stage_id);
+    //             }
+    //             Ok(Transformed::no(node))
+    //         })?;
+    //     Ok(result)
+    // }
+
+    // pub fn execution_plan(&self) -> PyExecutionPlan {
+    //     PyExecutionPlan::new(self.plan.clone())
+    // }
+    //
+    // fn display_execution_plan(&self) -> PyResult<String> {
+    //     Ok(display_plan_with_partition_counts(&self.plan).to_string())
+    // }
+
+    pub fn plan_bytes(&self) -> PyResult<Cow<[u8]>> {
+        Ok(Cow::Owned(self.task.encode_to_bytes()))
     }
 }
 

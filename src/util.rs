@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use futures::TryStreamExt;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
@@ -51,6 +52,8 @@ use crate::protobuf::FlightTicketData;
 use crate::stage_reader::DFRayStageReaderExec;
 use prost::Message;
 use tokio::macros::support::thread_rng_n;
+use crate::streaming::action_stream::StreamItem;
+use crate::streaming::input_manager::InputManager;
 
 pub(crate) trait ResultExt<T> {
     fn to_py_err(self) -> PyResult<T>;
@@ -314,6 +317,28 @@ pub async fn collect_from_stage(
     let ctx = SessionContext::new_with_state(state);
 
     plan.execute(partition, ctx.task_ctx())
+}
+
+pub async fn collect_from_stage_streaming(
+    stage_id: usize,
+    addr: &str,
+    output_stream_id: &str,
+    schema: SchemaRef,
+) -> Result<SendableRecordBatchStream, DataFusionError> {
+    let map = [(output_stream_id.to_string(), addr.to_string())]
+        .iter()
+        .cloned()
+        .collect();
+    let input_manager = InputManager::new(map).await?;
+    let stream = input_manager.stream_input(&"".to_string(), &output_stream_id.to_string(), 0, schema.clone()).await?;
+    let stream = stream.try_filter_map(|x| async {
+        match x {
+            StreamItem::Marker(_) => Ok(None),
+            StreamItem::RecordBatch(record_batch) => Ok(Some(record_batch)),
+        }
+    });
+
+    Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
 }
 
 /// Copied from datafusion_physical_plan::union as its useful and not public

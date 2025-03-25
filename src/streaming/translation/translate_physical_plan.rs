@@ -1,6 +1,3 @@
-use crate::task_definition::TaskDefinition;
-use crate::tasks::task_functions::FilterTask;
-use crate::utils::task_def_builder::TaskDefBuilder;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
@@ -11,8 +8,15 @@ use datafusion::prelude::SessionContext;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use arrow::datatypes::SchemaRef;
+use datafusion::common::internal_datafusion_err;
+use datafusion::physical_plan::memory::MemoryExec;
 use datafusion::physical_plan::projection::ProjectionExec;
-use crate::tasks::projection::ProjectionTask;
+use crate::stage::DFRayStageExec;
+use crate::streaming::task_definition::{TaskDefinition, TaskSpec};
+use crate::streaming::utils::task_def_builder::TaskDefBuilder;
+use crate::streaming::tasks::projection::{ProjectionExpression, ProjectionOperator, ProjectionTask};
+use crate::streaming::tasks::filter::{FilterOperator, FilterTask};
 
 // A kind of hacky way to uniquely identify Arc values
 struct Holder<T: ?Sized> {
@@ -134,6 +138,7 @@ impl TreeNodeVisitor<'_> for Visitor {
     fn f_up(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion, DataFusionError> {
         let any_node = node.as_any();
 
+        // TODO
         let conversion_result = if let Some(filter_exec) = any_node.downcast_ref::<FilterExec>() {
             // Validate
             if filter_exec.projection().is_some() {
@@ -143,17 +148,43 @@ impl TreeNodeVisitor<'_> for Visitor {
             let input_task = self.get_converted_task(filter_exec.input())?;
 
             let self_id = "filter-abcd"; // TODO
+            let input_schema = filter_exec.input().schema();
             let task = TaskDefBuilder::new(filter_exec.schema())
                 .id(self_id)
-                .function(Box::new(FilterTask::new(Arc::clone(filter_exec.predicate()))))
-                .input_address("__PLACEHOLDER__", input_task.output_stream_id.clone())
+                .spec(TaskSpec::Filter(FilterOperator::new(input_schema.clone(), filter_exec.predicate().clone())))
+                .input_address("__PLACEHOLDER__", input_task.output_stream_id.clone(), input_schema)
                 .build();
 
             self.tasks.insert(self_id.to_string(), task);
             TaskConversion::Converted(self_id.to_string())
         } else if let Some(values_exec) = any_node.downcast_ref::<ValuesExec>() {
-            let self_id = "values"; // TODO
-            let task = TaskDefBuilder::source(values_exec.data())
+            panic!();
+            // let self_id = "values"; // TODO
+            // let task = TaskDefBuilder::source(values_exec.data())
+            //     .id(self_id)
+            //     .build();
+            //
+            // self.tasks.insert(self_id.to_string(), task);
+            // TaskConversion::Converted(self_id.to_string())
+        } else if let Some(ray_stage_exec) = any_node.downcast_ref::<DFRayStageExec>() {
+            // Ignore these stages inserted by ray
+            let input_task = self.get_converted_task(&ray_stage_exec.input)?;
+            TaskConversion::Skipped((&input_task.id).clone())
+        } else if let Some(memory_exec) = any_node.downcast_ref::<MemoryExec>() {
+            // Validate
+            if memory_exec.projection().is_some() {
+                return Err(internal_datafusion_err!("MemoryExec cannot have a projection"));
+            }
+            if memory_exec.partitions().len() != 1 {
+                return Err(internal_datafusion_err!("Invalid number of projections: {}", memory_exec.partitions().len()));
+            }
+            if memory_exec.sort_information().len() > 0 {
+                return Err(internal_datafusion_err!("Don't support sorting"));
+            }
+
+            let self_id = "memory"; // TODO
+            let batches = &memory_exec.partitions()[0];
+            let task = TaskDefBuilder::source(batches.clone())
                 .id(self_id)
                 .build();
 
@@ -166,11 +197,20 @@ impl TreeNodeVisitor<'_> for Visitor {
             let input_task = self.get_converted_task(projection_exec.input())?;
 
             let self_id = "projection-abcd"; // TODO
-            let expressions = projection_exec.expr().iter().map(|(expr, _name)| expr.clone()).collect();
+            let input_schema = projection_exec.input().schema();
+            let expressions = projection_exec.expr().iter()
+                .map(|(expr, alias)| ProjectionExpression {
+                    expression: expr.clone(),
+                    alias: alias.clone(),
+                })
+                .collect();
             let task = TaskDefBuilder::new(projection_exec.schema())
                 .id(self_id)
-                .function(Box::new(ProjectionTask::new(projection_exec.input().schema(), expressions)))
-                .input_address("__PLACEHOLDER__", input_task.output_stream_id.clone())
+                .spec(TaskSpec::Projection(ProjectionOperator {
+                    schema: input_schema.clone(),
+                    expressions,
+                }))
+                .input_address("__PLACEHOLDER__", input_task.output_stream_id.clone(), input_schema.clone())
                 .build();
 
             self.tasks.insert(self_id.to_string(), task);
@@ -204,8 +244,8 @@ pub async fn translate_sql_to_tasks(sql: &str) -> Vec<TaskDefinition> {
 
 #[cfg(test)]
 mod tests {
-    use crate::translation::translate_physical_plan::{create_physical_datafusion_plan, translate_physical_plan};
     use datafusion::physical_plan::displayable;
+    use crate::streaming::translation::translate_physical_plan::{create_physical_datafusion_plan, translate_physical_plan};
 
     #[tokio::test]
     async fn can_translate_simple_query() {

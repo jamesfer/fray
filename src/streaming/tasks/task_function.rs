@@ -1,9 +1,8 @@
-use std::future::Future;
-use std::pin::Pin;
+use crate::streaming::action_stream::StreamItem;
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
-use tonic::async_trait;
-use crate::streaming::action_stream::{Marker, StreamItem};
+use std::future::Future;
+use std::pin::Pin;
 
 pub type OutputChannel = OutputChannelL<'static>;
 pub type OutputChannelL<'a> = Box<dyn (FnMut(StreamItem) -> Pin<Box<dyn Future<Output=()> + Sync + Send + 'a>>) + Sync + Send + 'a>;

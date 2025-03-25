@@ -1,16 +1,17 @@
-use crate::action_stream::{ActionStreamAdapter, SendableActionStream, StreamItem, StreamResult};
+use crate::streaming::action_stream::{ActionStreamAdapter, SendableActionStream, StreamItem, StreamResult};
 use async_stream::__private::AsyncStream;
 use async_stream::{stream, try_stream};
 use datafusion::arrow::datatypes::SchemaRef;
 use std::collections::HashMap;
-use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
+use datafusion::common::internal_datafusion_err;
 use datafusion::error::DataFusionError;
-use futures_core::Stream;
+use futures::Stream;
 use futures_util::StreamExt;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
+use crate::proto::generated::streaming_tasks as proto;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OutputBufferSlotState {
@@ -44,6 +45,44 @@ pub struct OutputSlotPartitioning {
     strategy: OutputPartitioningStrategy,
     pub total_partitions: usize,
     pub partition_range: Vec<usize>,
+}
+
+impl TryInto<proto::OutputSlotPartitioning> for OutputSlotPartitioning {
+    type Error = DataFusionError;
+
+    fn try_into(self) -> Result<proto::OutputSlotPartitioning, Self::Error> {
+        let strategy = match self.strategy {
+            OutputPartitioningStrategy::RoundRobin => proto::output_partition_strategy::Strategy::RoundRobin(proto::RoundRobinPartitioning {}),
+            OutputPartitioningStrategy::Hash => proto::output_partition_strategy::Strategy::Hash(proto::HashPartitioning {}),
+        };
+
+        Ok(proto::OutputSlotPartitioning {
+            strategy: Some(proto::OutputPartitionStrategy{ strategy: Some(strategy) }),
+            total_partitions: self.total_partitions as u64,
+            partition_range: self.partition_range.iter().map(|v| *v as u64).collect(),
+        })
+    }
+}
+
+impl TryFrom<proto::OutputSlotPartitioning> for OutputSlotPartitioning {
+    type Error = DataFusionError;
+
+    fn try_from(proto: proto::OutputSlotPartitioning) -> Result<Self, Self::Error> {
+        let proto_strategy = proto.strategy
+            .ok_or(internal_datafusion_err!("OutputSlotPartitioning strategy is required"))?
+            .strategy
+            .ok_or(internal_datafusion_err!("OutputSlotPartitioning strategy is required"))?;
+        let strategy = match proto_strategy {
+            proto::output_partition_strategy::Strategy::RoundRobin(_) => OutputPartitioningStrategy::RoundRobin,
+            proto::output_partition_strategy::Strategy::Hash(_) => OutputPartitioningStrategy::Hash,
+        };
+
+        Ok(Self {
+            strategy,
+            total_partitions: proto.total_partitions as usize,
+            partition_range: proto.partition_range.iter().map(|v| *v as usize).collect(),
+        })
+    }
 }
 
 struct OutputBufferSlot {
@@ -175,11 +214,12 @@ impl OutputManager {
         starting_checkpoint: Option<u64>,
     ) -> Result<SendableActionStream, ()> {
         // TODO throw an error if partition isn't found or disappears in a generation
-        let slot = Arc::clone({
-            let slots = self.slots.read();
-            slots.await.get(output_stream_id)
-                .ok_or(())?
-        });
+        let slot = {
+            let slots = &*self.slots.read().await;
+            let slot = slots.get(output_stream_id)
+                .ok_or(())?;
+            Arc::clone(slot)
+        };
 
         let schema: SchemaRef = {
             SchemaRef::clone(&slot.read().await.schema)

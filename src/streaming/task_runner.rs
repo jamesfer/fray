@@ -3,7 +3,7 @@ use crate::streaming::checkpoint_storage_manager::CheckpointStorageManager;
 use crate::streaming::input_manager::InputManager;
 use crate::streaming::output_manager::{OutputManager, OutputSlotPartitioning};
 use crate::streaming::task_definition::{TaskInputDefinition, TaskInputStreamGeneration};
-use crate::streaming::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
+use crate::streaming::tasks::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
 use datafusion::arrow::datatypes::SchemaRef;
 use futures_util::StreamExt;
 use std::collections::HashSet;
@@ -12,12 +12,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use crate::streaming::task_function::TaskFunction;
-use crate::streaming::input_manager::InputManager;
-use crate::streaming::output_manager::OutputSlotPartitioning;
-use crate::streaming::task_definition::TaskInputDefinition;
-// type TaskDataStream = impl Stream<Item=StreamItem> + Sync + Send;
-// type TaskDataStream = dyn Stream<Item=StreamItem> + Sync + Send;
 
 enum TaskType {
     Source,
@@ -349,6 +343,7 @@ impl TaskRunner {
                         &address.address,
                         &address.stream_id,
                         *partition,
+                        stream_def.input_schema.clone(),
                     ).await.unwrap();
                     streams.push((stream_def.ordinal, stream));
                 }
