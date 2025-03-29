@@ -36,6 +36,7 @@ pub mod stage;
 pub mod stage_reader;
 pub mod streaming;
 pub mod util;
+pub mod streaming_processor_service;
 
 #[pymodule]
 fn _datafusion_ray_internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -44,7 +45,7 @@ fn _datafusion_ray_internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<dataframe::DFRayDataFrame>()?;
     m.add_class::<dataframe::PyDFRayStage>()?;
     m.add_class::<processor_service::DFRayProcessorService>()?;
-    m.add_class::<streaming::streaming_processor_service::DFRayStreamingProcessorService>()?;
+    m.add_class::<streaming_processor_service::DFRayStreamingProcessorService>()?;
     m.add_class::<util::LocalValidator>()?;
     m.add_function(wrap_pyfunction!(util::prettify, m)?)?;
     Ok(())

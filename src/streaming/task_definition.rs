@@ -12,6 +12,7 @@ use crate::streaming::tasks::projection::ProjectionOperator;
 use crate::streaming::tasks::serialization::{ProtoSerializer, P};
 use crate::streaming::tasks::source::SourceOperator;
 use crate::streaming::tasks::task_function::TaskFunction;
+use crate::streaming::tasks::union::UnionOperator;
 
 #[derive(Clone)]
 pub struct TaskInputStreamAddress {
@@ -177,6 +178,7 @@ pub enum TaskSpec {
     Identity(IdentityOperator),
     Source(SourceOperator),
     Filter(FilterOperator),
+    Union(UnionOperator),
 }
 
 impl TaskSpec {
@@ -186,6 +188,7 @@ impl TaskSpec {
             TaskSpec::Source(source) => Box::new(source.into_function()),
             TaskSpec::Identity(identity) => Box::new(identity.into_function()),
             TaskSpec::Filter(filter) => Box::new(filter.into_function()),
+            TaskSpec::Union(union) => Box::new(union.into_function()),
         }
     }
 }
@@ -202,6 +205,7 @@ impl ProtoSerializer for TaskSpec {
                 Self::Identity(identity) => proto::task_spec::Task::Identity(identity.try_into_proto(&())?),
                 Self::Source(source) => proto::task_spec::Task::Source(source.try_into_proto(&())?),
                 Self::Filter(filter) => proto::task_spec::Task::Filter(filter.try_into_proto(&())?),
+                Self::Union(union) => proto::task_spec::Task::Union(union.try_into_proto(&())?),
             })
         })
     }
@@ -213,6 +217,7 @@ impl ProtoSerializer for TaskSpec {
             proto::task_spec::Task::Identity(identity) => Ok(Self::Identity(identity.try_from_proto(&())?)),
             proto::task_spec::Task::Source(source) => Ok(Self::Source(source.try_from_proto(&())?)),
             proto::task_spec::Task::Filter(filter) => Ok(Self::Filter(filter.try_from_proto(context)?)),
+            proto::task_spec::Task::Union(union) => Ok(Self::Union(union.try_from_proto(&())?)),
         }
     }
 }

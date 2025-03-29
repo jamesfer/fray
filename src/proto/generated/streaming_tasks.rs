@@ -129,8 +129,11 @@ pub struct FilterOperator {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UnionOperator {}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskSpec {
-    #[prost(oneof = "task_spec::Task", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "task_spec::Task", tags = "1, 2, 3, 4, 5")]
     pub task: ::core::option::Option<task_spec::Task>,
 }
 /// Nested message and enum types in `TaskSpec`.
@@ -146,5 +149,7 @@ pub mod task_spec {
         Source(super::SourceOperator),
         #[prost(message, tag = "4")]
         Filter(super::FilterOperator),
+        #[prost(message, tag = "5")]
+        Union(super::UnionOperator),
     }
 }

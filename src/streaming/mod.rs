@@ -1,11 +1,12 @@
-pub mod streaming_processor_service;
-pub mod action_stream;
+mod action_stream;
 mod checkpoint_storage_manager;
-pub mod input_manager;
-pub mod output_manager;
+mod input_manager;
+mod output_manager;
 pub mod task_definition;
 mod task_runner;
 mod tasks;
 pub mod translation;
-pub mod utils;
+mod utils;
 mod processor;
+pub mod worker_process;
+pub mod collect;

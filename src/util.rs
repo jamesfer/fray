@@ -14,7 +14,7 @@ use arrow::error::ArrowError;
 use arrow::ipc::convert::fb_to_schema;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-use arrow::ipc::{MetadataVersion, root_as_message};
+use arrow::ipc::{root_as_message, MetadataVersion};
 use arrow::pyarrow::*;
 use arrow::util::pretty;
 use arrow_flight::{FlightClient, FlightData, Ticket};
@@ -30,7 +30,7 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, SessionStateBuilder};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties, displayable};
+use datafusion::physical_plan::{displayable, ExecutionPlan, ExecutionPlanProperties};
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use datafusion_proto::physical_plan::AsExecutionPlan;
 use datafusion_python::utils::wait_for_future;
@@ -52,8 +52,6 @@ use crate::protobuf::FlightTicketData;
 use crate::stage_reader::DFRayStageReaderExec;
 use prost::Message;
 use tokio::macros::support::thread_rng_n;
-use crate::streaming::action_stream::StreamItem;
-use crate::streaming::input_manager::InputManager;
 
 pub(crate) trait ResultExt<T> {
     fn to_py_err(self) -> PyResult<T>;
@@ -317,28 +315,6 @@ pub async fn collect_from_stage(
     let ctx = SessionContext::new_with_state(state);
 
     plan.execute(partition, ctx.task_ctx())
-}
-
-pub async fn collect_from_stage_streaming(
-    stage_id: usize,
-    addr: &str,
-    output_stream_id: &str,
-    schema: SchemaRef,
-) -> Result<SendableRecordBatchStream, DataFusionError> {
-    let map = [(output_stream_id.to_string(), addr.to_string())]
-        .iter()
-        .cloned()
-        .collect();
-    let input_manager = InputManager::new(map).await?;
-    let stream = input_manager.stream_input(&"".to_string(), &output_stream_id.to_string(), 0, schema.clone()).await?;
-    let stream = stream.try_filter_map(|x| async {
-        match x {
-            StreamItem::Marker(_) => Ok(None),
-            StreamItem::RecordBatch(record_batch) => Ok(Some(record_batch)),
-        }
-    });
-
-    Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
 }
 
 /// Copied from datafusion_physical_plan::union as its useful and not public

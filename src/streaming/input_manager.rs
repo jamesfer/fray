@@ -1,18 +1,17 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use crate::proto::generated::streaming::StreamingFlightTicketData;
+use crate::streaming::action_stream::{ActionStreamAdapter, SendableActionStream};
+use crate::streaming::processor::stream_serialization::decode_flight_to_stream;
+use crate::util::make_client;
 use arrow::datatypes::SchemaRef;
+use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::{FlightClient, Ticket};
-use arrow_flight::decode::{DecodedFlightData, DecodedPayload, FlightRecordBatchStream};
 use bytes::Bytes;
 use datafusion::common::{internal_datafusion_err, DataFusionError};
 use futures::TryStreamExt;
 use itertools::Itertools;
 use prost::Message;
+use std::collections::HashMap;
 use tokio::sync::Mutex;
-use crate::proto::generated::streaming::StreamingFlightTicketData;
-use crate::streaming::action_stream::{ActionStreamAdapter, Marker, SendableActionStream, StreamItem};
-use crate::streaming::processor::stream_serialization::decode_flight_to_stream;
-use crate::util::make_client;
 
 pub struct InputManager {
     client_map: HashMap<String, Mutex<FlightClient>>,

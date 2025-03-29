@@ -1,17 +1,17 @@
+use crate::proto::generated::streaming_tasks as proto;
 use crate::streaming::action_stream::{ActionStreamAdapter, SendableActionStream, StreamItem, StreamResult};
 use async_stream::__private::AsyncStream;
 use async_stream::{stream, try_stream};
 use datafusion::arrow::datatypes::SchemaRef;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 use datafusion::common::internal_datafusion_err;
 use datafusion::error::DataFusionError;
 use futures::Stream;
 use futures_util::StreamExt;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use crate::proto::generated::streaming_tasks as proto;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OutputBufferSlotState {

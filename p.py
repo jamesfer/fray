@@ -15,7 +15,7 @@ def main():
     df.show()
     print("Shown")
 
-    df = ctx.sql("SELECT * FROM VALUES (1), (2), (3) WHERE column1 > 1")
+    df = ctx.sql("SELECT * FROM (SELECT * FROM VALUES (1), (2), (3) UNION ALL SELECT * FROM VALUES (4), (5)) WHERE column1 > 1")
     print(df.execution_plan())
 
     df.streaming_show()

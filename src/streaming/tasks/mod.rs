@@ -4,3 +4,4 @@ pub mod serialization;
 pub mod identity;
 pub mod source;
 pub mod filter;
+pub mod union;

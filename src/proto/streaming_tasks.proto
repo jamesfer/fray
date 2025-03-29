@@ -82,11 +82,14 @@ message FilterOperator {
   datafusion.PhysicalExprNode expression = 2;
 }
 
+message UnionOperator {}
+
 message TaskSpec {
   oneof task {
     ProjectionOperator projection = 1;
     IdentityOperator identity = 2;
     SourceOperator source = 3;
     FilterOperator filter = 4;
+    UnionOperator union = 5;
   }
 }
