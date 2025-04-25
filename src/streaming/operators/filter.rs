@@ -7,9 +7,9 @@ use std::sync::Arc;
 use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::prelude::SessionContext;
 use crate::streaming::action_stream::StreamItem;
-use crate::streaming::tasks::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
+use crate::streaming::operators::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
 use crate::proto::generated::streaming_tasks as proto;
-use crate::streaming::tasks::serialization::{ProtoSerializer, P};
+use crate::streaming::operators::serialization::{ProtoSerializer, P};
 
 #[derive(Clone)]
 pub struct FilterOperator {

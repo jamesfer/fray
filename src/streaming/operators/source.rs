@@ -1,7 +1,7 @@
 use crate::proto::generated::streaming_tasks as proto;
 use crate::streaming::action_stream::{Marker, StreamItem};
-use crate::streaming::tasks::serialization::ProtoSerializer;
-use crate::streaming::tasks::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
+use crate::streaming::operators::serialization::ProtoSerializer;
+use crate::streaming::operators::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
 use arrow::array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;

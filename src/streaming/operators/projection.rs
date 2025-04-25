@@ -1,7 +1,5 @@
 use crate::proto::generated::streaming_tasks as proto;
 use crate::streaming::action_stream::StreamItem;
-use crate::streaming::tasks::serialization::{ProtoSerializer, P};
-use crate::streaming::tasks::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::common::{internal_datafusion_err, DataFusionError};
@@ -10,6 +8,8 @@ use datafusion::physical_plan::streaming_operators::projection::ProjectionStream
 use datafusion::prelude::SessionContext;
 use std::sync::Arc;
 use async_trait::async_trait;
+use crate::streaming::operators::serialization::{ProtoSerializer, P};
+use crate::streaming::operators::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
 
 #[derive(Clone)]
 pub struct ProjectionExpression {

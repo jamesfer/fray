@@ -1,10 +1,10 @@
 use crate::streaming::output_manager::OutputSlotPartitioning;
 use crate::streaming::task_definition::{TaskDefinition, TaskInputDefinition, TaskInputPhase, TaskInputStream, TaskInputStreamAddress, TaskInputStreamGeneration, TaskSpec};
-use crate::streaming::tasks::source::{SourceOperator, SourceTask};
+use crate::streaming::operators::source::{SourceOperator, SourceTask};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use rand::{random, Rng};
-use crate::streaming::tasks::identity::{IdentityOperator, IdentityTask};
+use crate::streaming::operators::identity::{IdentityOperator, IdentityTask};
 
 pub struct TaskDefBuilder {
     // Required

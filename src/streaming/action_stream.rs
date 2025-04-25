@@ -13,7 +13,7 @@ use futures::Stream;
 use prost::{DecodeError, Message};
 use crate::proto::generated::streaming as proto;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Marker {
     pub checkpoint_number: u64,
 }

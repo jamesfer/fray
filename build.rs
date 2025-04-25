@@ -20,7 +20,7 @@ use std::path::Path;
 fn main() -> Result<(), String> {
     use std::io::Write;
 
-    let in_dir = std::path::PathBuf::from("src/proto");
+    let in_dir = std::path::PathBuf::from("src/proto/src");
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let destination_dir = std::path::PathBuf::from("src/proto/generated");
 
@@ -40,13 +40,16 @@ fn main() -> Result<(), String> {
     // We don't include the proto files in releases so that downstreams
     // do not need to have PROTOC included
     if Path::new("src/proto/datafusion_ray.proto").exists() {
-        let input_files: Vec<_> = proto_files.iter()
-            .map(|(input_file, _, _)| in_dir.join(input_file))
-            .collect();
-
         println!("cargo:rerun-if-changed=src/proto/datafusion_common.proto");
         println!("cargo:rerun-if-changed=src/proto/datafusion.proto");
         println!("cargo:rerun-if-changed=src/proto/datafusion_ray.proto");
+        for (file, _, _) in proto_files {
+            println!("cargo:rerun-if-changed={}", in_dir.join(file).display());
+        }
+
+        let input_files: Vec<_> = proto_files.iter()
+            .map(|(input_file, _, _)| in_dir.join(input_file))
+            .collect();
         tonic_build::configure()
             .extern_path(".datafusion", "::datafusion_proto::protobuf")
             .extern_path(".datafusion_common", "::datafusion_proto::protobuf")

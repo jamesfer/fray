@@ -23,7 +23,7 @@ pub fn encode_stream_to_flight(
             match stream_result {
                 Ok(StreamItem::RecordBatch(record_batch)) => Ok(FlightDataItem::RecordBatch(record_batch)),
                 Ok(StreamItem::Marker(marker)) => Ok(FlightDataItem::AppMetadata(Bytes::from(marker.to_bytes()))),
-                Err(err) => Err(ArrowError::from_external_error(Box::new(err))),
+                Err(err) => Err(err),
             }
         });
 

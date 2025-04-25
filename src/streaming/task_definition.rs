@@ -6,13 +6,13 @@ use datafusion::prelude::SessionContext;
 use prost::Message;
 use crate::streaming::output_manager::OutputSlotPartitioning;
 use crate::proto::generated::streaming_tasks as proto;
-use crate::streaming::tasks::filter::FilterOperator;
-use crate::streaming::tasks::identity::IdentityOperator;
-use crate::streaming::tasks::projection::ProjectionOperator;
-use crate::streaming::tasks::serialization::{ProtoSerializer, P};
-use crate::streaming::tasks::source::SourceOperator;
-use crate::streaming::tasks::task_function::TaskFunction;
-use crate::streaming::tasks::union::UnionOperator;
+use crate::streaming::operators::filter::FilterOperator;
+use crate::streaming::operators::identity::IdentityOperator;
+use crate::streaming::operators::projection::ProjectionOperator;
+use crate::streaming::operators::serialization::{ProtoSerializer, P};
+use crate::streaming::operators::source::SourceOperator;
+use crate::streaming::operators::task_function::{OperatorFunction, TaskFunction};
+use crate::streaming::operators::union::UnionOperator;
 
 #[derive(Clone)]
 pub struct TaskInputStreamAddress {
@@ -172,6 +172,7 @@ impl Into<proto::TaskInputDefinition> for TaskInputDefinition {
 //     pub order: TaskInputEvaluationOrder,
 // }
 
+// TODO rename
 #[derive(Clone)]
 pub enum TaskSpec {
     Projection(ProjectionOperator),
@@ -190,6 +191,10 @@ impl TaskSpec {
             TaskSpec::Filter(filter) => Box::new(filter.into_function()),
             TaskSpec::Union(union) => Box::new(union.into_function()),
         }
+    }
+
+    pub fn create_operator_function(&self) -> Box<dyn OperatorFunction + Sync + Send> {
+        todo!()
     }
 }
 
@@ -220,6 +225,80 @@ impl ProtoSerializer for TaskSpec {
             proto::task_spec::Task::Union(union) => Ok(Self::Union(union.try_from_proto(&())?)),
         }
     }
+}
+
+#[derive(Clone)]
+pub struct OperatorInput {
+    pub stream_id: String,
+    pub input_schema: SchemaRef,
+    pub ordinal: usize,
+    pub internal: bool,
+}
+
+#[derive(Clone)]
+pub struct OperatorInputPhase {
+    pub inputs: Vec<OperatorInput>
+}
+
+#[derive(Clone)]
+pub struct OperatorOutput {
+    pub stream_id: String,
+    pub schema: SchemaRef,
+    pub partitioning: Option<OutputSlotPartitioning>,
+    pub internal: bool,
+}
+
+#[derive(Clone)]
+pub struct OperatorDefinition {
+    pub id: String,
+    pub spec: TaskSpec,
+    pub checkpoint_id: String,
+    pub inputs: Vec<OperatorInputPhase>,
+    pub outputs: Vec<OperatorOutput>
+}
+
+#[derive(Clone)]
+pub struct Operators {
+    pub operators: Vec<OperatorDefinition>,
+}
+
+pub struct TaskDefinition2 {
+    pub id: String,
+    pub operators: Operators,
+}
+
+#[derive(Clone)]
+pub struct TaskInputStreamT {
+    pub stream_id: String,
+    // Include partition information
+    pub address: Vec<String>,
+}
+
+#[derive(Clone)]
+pub enum TransitionRequirement {
+    After(u64),
+}
+
+#[derive(Clone)]
+pub struct TaskStreamTransitionRequirement {
+    pub stream_id: String,
+    pub transition_requirement: TransitionRequirement,
+}
+
+#[derive(Clone)]
+pub struct TaskGenerationTransition {
+    requirements: Vec<TaskStreamTransitionRequirement>,
+}
+
+#[derive(Clone)]
+pub struct TaskInputGen {
+    pub streams: Vec<TaskInputStreamT>,
+    pub partition_range: Vec<usize>,
+    pub transition_requirements: TaskGenerationTransition,
+}
+
+pub struct TaskInputs {
+    pub generations: Vec<TaskInputGen>,
 }
 
 #[derive(Clone)]

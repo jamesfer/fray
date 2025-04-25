@@ -17,9 +17,9 @@ use datafusion::physical_plan::union::UnionExec;
 use crate::stage::DFRayStageExec;
 use crate::streaming::task_definition::{TaskDefinition, TaskInputDefinition, TaskInputPhase, TaskInputStream, TaskInputStreamAddress, TaskInputStreamGeneration, TaskSpec};
 use crate::streaming::utils::task_def_builder::TaskDefBuilder;
-use crate::streaming::tasks::projection::{ProjectionExpression, ProjectionOperator, ProjectionTask};
-use crate::streaming::tasks::filter::{FilterOperator, FilterTask};
-use crate::streaming::tasks::union::UnionOperator;
+use crate::streaming::operators::projection::{ProjectionExpression, ProjectionOperator, ProjectionTask};
+use crate::streaming::operators::filter::{FilterOperator, FilterTask};
+use crate::streaming::operators::union::UnionOperator;
 
 // A kind of hacky way to uniquely identify Arc values
 struct Holder<T: ?Sized> {

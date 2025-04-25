@@ -25,7 +25,7 @@ version = "0.1.0"
 edition = "2024"
 readme = "README.md"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.86"
 build = "build.rs"
 
 [patch.crates-io]
@@ -124,6 +124,8 @@ pin-project = "1.1.10"
 serde = { version = "1.0.219", features = ["derive"] }
 flexbuffers = "24.12.23"
 flatbuffers = "24.12.23"
+crossbeam = "0.8.4"
+flume = "0.11.1"
 
 [build-dependencies]
 prost-types = "0.13"

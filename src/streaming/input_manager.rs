@@ -1,5 +1,5 @@
 use crate::proto::generated::streaming::StreamingFlightTicketData;
-use crate::streaming::action_stream::{ActionStreamAdapter, SendableActionStream};
+use crate::streaming::action_stream::{ActionStreamAdapter, SendableActionStream, StreamItem};
 use crate::streaming::processor::stream_serialization::decode_flight_to_stream;
 use crate::util::make_client;
 use arrow::datatypes::SchemaRef;
@@ -7,7 +7,7 @@ use arrow_flight::decode::FlightRecordBatchStream;
 use arrow_flight::{FlightClient, Ticket};
 use bytes::Bytes;
 use datafusion::common::{internal_datafusion_err, DataFusionError};
-use futures::TryStreamExt;
+use futures::{Stream, TryStreamExt};
 use itertools::Itertools;
 use prost::Message;
 use std::collections::HashMap;
@@ -29,18 +29,32 @@ impl InputManager {
         })
     }
 
-    pub async fn stream_input(&self, _address: &String, input_stream_id: &String, partition: usize, schema: SchemaRef) -> Result<SendableActionStream, DataFusionError> {
+    pub async fn stream_input(&self, _address: &str, input_stream_id: &str, partition: usize, schema: SchemaRef) -> Result<SendableActionStream, DataFusionError> {
         let address = self.stream_id_map.get(input_stream_id).ok_or(internal_datafusion_err!("Stream ID not found"))?;
         let client = self.client_map.get(address).ok_or(internal_datafusion_err!("Client not found"))?;
         let inner_ticket = StreamingFlightTicketData {
             partition: partition as u64,
-            stream_id: input_stream_id.clone(),
+            stream_id: input_stream_id.to_string(),
         };
         let ticket = Ticket { ticket: Bytes::from(inner_ticket.encode_to_vec()) };
         let client = &mut *client.lock().await;
         let flight_data_stream = client.do_get(ticket).await
             .map_err(|e| internal_datafusion_err!("Error getting flight stream: {}", e))?;
         Ok(Self::convert_to_sendable_action_stream(schema, flight_data_stream))
+    }
+
+    pub async fn stream_input_no_schema(&self, address: &str, input_stream_id: &str, partition: usize) -> Result<impl Stream<Item=Result<StreamItem, DataFusionError>>, DataFusionError> {
+        // TODO start client if one doesn't exist
+        let client = self.client_map.get(address).ok_or(internal_datafusion_err!("Client not found"))?;
+        let inner_ticket = StreamingFlightTicketData {
+            partition: partition as u64,
+            stream_id: input_stream_id.to_string(),
+        };
+        let ticket = Ticket { ticket: Bytes::from(inner_ticket.encode_to_vec()) };
+        let client = &mut *client.lock().await;
+        let flight_data_stream = client.do_get(ticket).await
+            .map_err(|e| internal_datafusion_err!("Error getting flight stream: {}", e))?;
+        Ok(decode_flight_to_stream(flight_data_stream))
     }
 
     async fn connect_to(clients: Vec<String>) -> Result<HashMap<String, Mutex<FlightClient>>, DataFusionError> {

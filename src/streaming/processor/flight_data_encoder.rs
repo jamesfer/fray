@@ -23,7 +23,8 @@ use arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator};
 use arrow_flight::{FlightData, FlightDescriptor, SchemaAsIpc};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::ipc::writer::IpcWriteOptions;
-use datafusion::arrow::error::Result;
+use arrow_flight::error::Result;
+
 // use crate::{error::Result, FlightData, FlightDescriptor, SchemaAsIpc};
 //
 // use arrow_array::{Array, ArrayRef, RecordBatch, RecordBatchOptions, UnionArray};
@@ -820,7 +821,7 @@ mod tests {
         let batch1 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr1)]).unwrap();
         let batch2 = RecordBatch::try_new(schema, vec![Arc::new(arr2)]).unwrap();
 
-        let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
+        let stream = futures::stream::iter(vec![Ok(FlightDataItem::RecordBatch(batch1)), Ok(FlightDataItem::RecordBatch(batch2))]);
 
         let encoder = FlightDataEncoderBuilder::default().build(stream);
         let mut decoder = FlightDataDecoder::new(encoder);
@@ -879,7 +880,7 @@ mod tests {
         let batch1 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr1)]).unwrap();
         let batch2 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr2)]).unwrap();
 
-        let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
+        let stream = futures::stream::iter(vec![Ok(FlightDataItem::RecordBatch(batch1)), Ok(FlightDataItem::RecordBatch(batch2))]);
 
         let encoder = FlightDataEncoderBuilder::default()
             .with_schema(schema)
@@ -903,7 +904,7 @@ mod tests {
         let batch1 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr1)]).unwrap();
         let batch2 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr2)]).unwrap();
 
-        let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
+        let stream = futures::stream::iter(vec![Ok(FlightDataItem::RecordBatch(batch1)), Ok(FlightDataItem::RecordBatch(batch2))]);
 
         let encoder = FlightDataEncoderBuilder::default()
             .with_dictionary_handling(DictionaryHandling::Resend)
@@ -959,7 +960,7 @@ mod tests {
         let batch1 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr1)]).unwrap();
         let batch2 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr2)]).unwrap();
 
-        let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
+        let stream = futures::stream::iter(vec![Ok(FlightDataItem::RecordBatch(batch1)), Ok(FlightDataItem::RecordBatch(batch2))]);
 
         let encoder = FlightDataEncoderBuilder::default().build(stream);
 
@@ -1061,7 +1062,7 @@ mod tests {
         let batch1 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr1)]).unwrap();
         let batch2 = RecordBatch::try_new(schema, vec![Arc::new(arr2)]).unwrap();
 
-        let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
+        let stream = futures::stream::iter(vec![Ok(FlightDataItem::RecordBatch(batch1)), Ok(FlightDataItem::RecordBatch(batch2))]);
 
         let encoder = FlightDataEncoderBuilder::default().build(stream);
 
@@ -1242,7 +1243,7 @@ mod tests {
         let batch2 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr2)]).unwrap();
         let batch3 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr3)]).unwrap();
 
-        let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2), Ok(batch3)]);
+        let stream = futures::stream::iter(vec![Ok(FlightDataItem::RecordBatch(batch1)), Ok(FlightDataItem::RecordBatch(batch2)), Ok(FlightDataItem::RecordBatch(batch3))]);
 
         let encoder = FlightDataEncoderBuilder::default().build(stream);
 
@@ -1461,7 +1462,7 @@ mod tests {
         let batch1 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr1)]).unwrap();
         let batch2 = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr2)]).unwrap();
 
-        let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
+        let stream = futures::stream::iter(vec![Ok(FlightDataItem::RecordBatch(batch1)), Ok(FlightDataItem::RecordBatch(batch2))]);
 
         let encoder = FlightDataEncoderBuilder::default().build(stream);
 
@@ -1577,7 +1578,7 @@ mod tests {
         let encoder = FlightDataEncoderBuilder::default()
             .with_options(IpcWriteOptions::default().with_preserve_dict_id(false))
             .with_dictionary_handling(DictionaryHandling::Resend)
-            .build(futures::stream::iter(batches.clone().into_iter().map(Ok)));
+            .build(futures::stream::iter(batches.clone().into_iter().map(|batch| Ok(FlightDataItem::RecordBatch(batch)))));
 
         let mut expected_batches = batches.drain(..);
 
@@ -1896,7 +1897,7 @@ mod tests {
                 .with_max_flight_data_size(max_flight_data_size)
                 // use 8-byte alignment - default alignment is 64 which produces bigger ipc data
                 .with_options(IpcWriteOptions::try_new(8, false, MetadataVersion::V5).unwrap())
-                .build(futures::stream::iter([Ok(batch.clone())]));
+                .build(futures::stream::iter([Ok(FlightDataItem::RecordBatch(batch.clone()))]));
 
             let mut i = 0;
             while let Some(data) = stream.next().await.transpose().unwrap() {

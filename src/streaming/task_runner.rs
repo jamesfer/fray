@@ -3,7 +3,7 @@ use crate::streaming::checkpoint_storage_manager::CheckpointStorageManager;
 use crate::streaming::input_manager::InputManager;
 use crate::streaming::output_manager::{OutputManager, OutputSlotPartitioning};
 use crate::streaming::task_definition::{TaskInputDefinition, TaskInputStreamGeneration};
-use crate::streaming::tasks::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
+use crate::streaming::operators::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
 use datafusion::arrow::datatypes::SchemaRef;
 use futures_util::StreamExt;
 use std::collections::HashSet;
