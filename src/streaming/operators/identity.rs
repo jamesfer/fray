@@ -1,12 +1,15 @@
+use std::pin::Pin;
 use async_trait::async_trait;
 use arrow::array::RecordBatch;
 use std::sync::Arc;
 use arrow::datatypes::Schema;
+use futures::Stream;
 use datafusion::common::DataFusionError;
 use crate::streaming::action_stream::StreamItem;
 use crate::streaming::operators::serialization::ProtoSerializer;
-use crate::streaming::operators::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
+use crate::streaming::operators::task_function::{CreateOperatorFunction2, OperatorFunction2, OutputChannel, OutputChannelL, SItem, TaskFunction, TaskState};
 use crate::proto::generated::streaming_tasks as proto;
+use crate::streaming::runtime::Runtime;
 
 #[derive(Clone)]
 pub struct IdentityOperator;
@@ -14,6 +17,12 @@ pub struct IdentityOperator;
 impl IdentityOperator {
     pub fn into_function(self) -> IdentityTask {
         IdentityTask
+    }
+}
+
+impl CreateOperatorFunction2 for IdentityOperator {
+    fn create_operator_function(&self) -> Box<dyn OperatorFunction2 + Sync + Send> {
+        Box::new(IdentityOperatorFunction)
     }
 }
 
@@ -53,4 +62,21 @@ impl TaskFunction for IdentityTask {
     async fn load_state(&mut self, state: RecordBatch) {}
 
     async fn finish(&mut self, output: &mut OutputChannel) {}
+}
+
+struct IdentityOperatorFunction;
+
+#[async_trait]
+impl OperatorFunction2 for IdentityOperatorFunction {
+    async fn init(&mut self, _runtime: Arc<Runtime>) {
+        // No-op
+    }
+
+    async fn run<'a>(&'a mut self, inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)> {
+        inputs
+    }
+
+    async fn close(self: Box<Self>) {
+        // No-op
+    }
 }

@@ -1,13 +1,17 @@
+use std::pin::Pin;
 use crate::proto::generated::streaming_tasks as proto;
 use crate::streaming::action_stream::{Marker, StreamItem};
 use crate::streaming::operators::serialization::ProtoSerializer;
-use crate::streaming::operators::task_function::{OutputChannel, OutputChannelL, TaskFunction, TaskState};
+use crate::streaming::operators::task_function::{CreateOperatorFunction2, OperatorFunction2, OutputChannel, OutputChannelL, SItem, TaskFunction, TaskState};
 use arrow::array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use async_trait::async_trait;
 use datafusion::common::DataFusionError;
 use std::sync::Arc;
+use futures::Stream;
+use futures::stream::iter;
+use crate::streaming::runtime::Runtime;
 
 #[derive(Clone)]
 pub struct SourceOperator {
@@ -23,6 +27,14 @@ impl SourceOperator {
 
     pub fn into_function(self) -> SourceTask {
         SourceTask::new(self.data)
+    }
+}
+
+impl CreateOperatorFunction2 for SourceOperator {
+    // type OperatorFunctionType = SourceTask;
+
+    fn create_operator_function(&self) -> Box<dyn OperatorFunction2 + Sync + Send> {
+        Box::new(SourceTask::new(self.data.clone()))
     }
 }
 
@@ -114,5 +126,23 @@ impl TaskFunction for SourceTask {
         let value = column.value(0);
         println!("Loading state with offset of {}", value);
         self.offset = value as usize;
+    }
+}
+
+#[async_trait]
+impl OperatorFunction2 for SourceTask {
+    async fn init(&mut self, _runtime: Arc<Runtime>) {
+        // No-op
+    }
+
+    async fn run<'a>(&'a mut self, inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)> {
+        assert_eq!(inputs.len(), 0, "Source operator should not have any inputs");
+
+        let record_batch_stream = iter(self.data.iter().map(|batch| SItem::RecordBatch(batch.clone())));
+        vec![(0, vec![Box::pin(record_batch_stream)])]
+    }
+
+    async fn close(self: Box<Self>) {
+        // No-op
     }
 }

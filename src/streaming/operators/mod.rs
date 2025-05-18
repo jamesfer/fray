@@ -7,3 +7,5 @@ pub mod filter;
 pub mod union;
 mod nested;
 mod utils;
+pub mod operator;
+mod remote_source;

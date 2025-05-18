@@ -4,8 +4,11 @@ use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use datafusion::common::DataFusionError;
 use futures::Stream;
+use crate::streaming::generation::GenerationSpec;
+use crate::streaming::runtime::Runtime;
 
 pub type OutputChannel = OutputChannelL<'static>;
 pub type OutputChannelL<'a> = Box<dyn (FnMut(StreamItem) -> Pin<Box<dyn Future<Output=()> + Sync + Send + 'a>>) + Sync + Send + 'a>;
@@ -47,16 +50,32 @@ pub trait OperatorFunction {
 }
 
 
+#[derive(PartialEq, Debug)]
 pub enum SItem {
     RecordBatch(RecordBatch),
     Marker(Marker),
     Generation(usize),
 }
 
+pub enum UpdateGenerationError {
+    // A stream id or partition the operator is using didn't appear in the generation spec.
+    // This is probably not recoverable
+    InvalidGeneration { reason: String },
+    // The operator has already passed the where the next generation is required to start from.
+    // The operator should probably be cancelled and restarted from the new generation
+    IncompatibleStartOffsets,
+}
+
 #[async_trait]
 pub trait OperatorFunction2 {
-    async fn init(&mut self);
-    // Source operators would have no inputs defined, so this would be an empty slice
+    // TODO somehow make it possible to call this while other methods are running
+    // async fn update_generation(&self, generation: GenerationSpec) -> Result<(), UpdateGenerationError> {
+    //     Ok(())
+    // }
+    
+    async fn init(&mut self, runtime: Arc<Runtime>);
+    // async fn load(&mut self, checkpoint: usize, partitions: Vec<usize>) -> ();
+    // Source operators would have no inputs defined, so inputs would be an empty slice
     // The majority of operators would only take a single input stream per ordinal, and only return
     // a single output per ordinal (and the majority of those would only return one output stream).
     // The vectors allow for operators to make use of the preserved ordered-ness of the inputs
@@ -86,16 +105,42 @@ pub trait OperatorFunction2 {
     // generation marker, rather than the marker that the task started with. In turn, the operator
     // agrees that once it polls a stream, it must support consuming its contents at some point
     // before processing a generation marker.
-    // TODO handle errors
+    // TODO add errors to the return streams
+    // TODO use non mutable ref
     async fn run<'a>(
         &'a mut self,
-        inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync>>>)>,
-    ) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync>>>)>;
+        inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>,
+    ) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>;
+    // Lists the most recently completed checkpoint. Used to know where the operator should resume
+    // from when it needs to restart or reset back in time.
+    // async fn last_checkpoint(&self) -> usize;
     async fn close(self: Box<Self>);
 }
 
+#[async_trait]
+impl OperatorFunction2 for Box<dyn OperatorFunction2 + Sync + Send> {
+    async fn init(&mut self, runtime: Arc<Runtime>) {
+        self.as_mut().init(runtime).await;
+    }
+
+    async fn run<'a>(
+        &'a mut self,
+        inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>,
+    ) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)> {
+        self.as_mut().run(inputs).await
+    }
+
+    async fn close(self: Box<Self>) {
+        (*self).close().await;
+    }
+}
+
 pub trait CreateOperatorFunction2 {
+    // type OperatorFunctionType: OperatorFunction2 + Sync + Send;
     fn create_operator_function(&self) -> Box<dyn OperatorFunction2 + Sync + Send>;
+    // fn create_boxed_operator_function(&self) -> Box<dyn OperatorFunction2 + Sync + Send> {
+    //     Box::new(self.create_operator_function())
+    // }
 }
 
 
