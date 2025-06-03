@@ -1,17 +1,16 @@
-use std::fmt::{Debug, Formatter};
-use crate::streaming::action_stream::{Marker, OrdinalStreamResult, SendableActionStream, StreamItem};
+use crate::streaming::action_stream::{Marker, OrdinalStreamResult, StreamItem};
+use crate::streaming::generation::{GenerationInputDetail, GenerationSpec};
+use crate::streaming::operators::utils::fiber_stream::FiberStream;
+use crate::streaming::runtime::Runtime;
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::DataFusionError;
+use eyeball::{AsyncLock, SharedObservable};
+use futures::Stream;
+use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use eyeball::{AsyncLock, SharedObservable};
-use flume::Receiver;
-use datafusion::common::DataFusionError;
-use futures::Stream;
-use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, TaskSchedulingDetailsUpdate};
-use crate::streaming::operators::utils::fiber_stream::FiberStream;
-use crate::streaming::runtime::Runtime;
 
 pub type OutputChannel = OutputChannelL<'static>;
 pub type OutputChannelL<'a> = Box<dyn (FnMut(StreamItem) -> Pin<Box<dyn Future<Output=()> + Sync + Send + 'a>>) + Sync + Send + 'a>;

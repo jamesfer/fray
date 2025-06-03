@@ -1,25 +1,21 @@
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
-use std::sync::Arc;
-use datafusion_python::utils::wait_for_future;
-use local_ip_address::local_ip;
-use datafusion::error::DataFusionError;
-use datafusion::prelude::SessionContext;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
-use datafusion::common::internal_datafusion_err;
 use crate::flight::FlightHandler;
 use crate::streaming::checkpoint_storage_manager::CheckpointStorageManager;
 use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, TaskSchedulingDetailsUpdate};
 use crate::streaming::input_manager::InputManager;
 use crate::streaming::output_manager::OutputManager;
-use crate::streaming::processor::flight_handler::ProcessorFlightHandler;
 use crate::streaming::runtime::Runtime;
 use crate::streaming::task_definition::TaskDefinition;
 use crate::streaming::task_definition_2::TaskDefinition2;
 use crate::streaming::task_main_3::RunningTask;
 use crate::streaming::task_runner::TaskRunner;
+use datafusion::common::internal_datafusion_err;
+use datafusion::error::DataFusionError;
+use local_ip_address::local_ip;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 struct DFRayStreamingTaskExecutor {
     stage_id: usize,
@@ -189,7 +185,6 @@ impl WorkerProcess {
 
 #[cfg(test)]
 mod tests {
-    use datafusion::common::record_batch;
     use crate::streaming::generation::GenerationSpec;
     use crate::streaming::operators::nested::NestedOperator;
     use crate::streaming::operators::operator::{OperatorDefinition, OperatorInput, OperatorOutput, OperatorSpec};
@@ -199,10 +194,10 @@ mod tests {
     use crate::streaming::task_definition_2::TaskDefinition2;
     use crate::streaming::utils::create_remote_stream::create_remote_stream;
     use crate::streaming::worker_process::{InitialSchedulingDetails, WorkerProcess};
+    use datafusion::common::record_batch;
     use futures::StreamExt;
     use std::future::Future;
     use std::time::Duration;
-    use datafusion::error::DataFusionError;
     use tokio::time::sleep;
 
     #[tokio::test]
