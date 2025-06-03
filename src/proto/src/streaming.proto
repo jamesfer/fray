@@ -8,8 +8,8 @@ import "datafusion.proto";
 message StreamingFlightTicketData {
   // output stream id
   string stream_id = 1;
-  // partition id of the stream
-  uint64 partition = 2;
+  // partitions of the stream
+  repeated uint64 partitions = 2;
 }
 
 message Marker {

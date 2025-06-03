@@ -1,3 +1,5 @@
+use serde::de::{Error, Visitor};
+
 // mod schema {
 //     use arrow::datatypes::SchemaRef;
 //     use prost::Message;
@@ -36,7 +38,114 @@
 //         }
 //     }
 // }
-//
+
+pub mod record_batches {
+    use arrow::array::RecordBatch;
+    use arrow::ipc::reader::StreamReader;
+    use arrow::ipc::writer::StreamWriter;
+    use serde::de::Error as DeError;
+    use serde::ser::Error as SerError;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(record_batches: &[RecordBatch], serializer: S) -> Result<S::Ok, S::Error> {
+        // Create a stream writer with the schema from the first batch
+        match record_batches.first() {
+            None => {
+                serializer.serialize_bytes(&[])
+            },
+            Some(record_batch) => {
+                let mut buffer = Vec::new();
+                let mut writer = StreamWriter::try_new(&mut buffer, record_batch.schema_ref())
+                    .map_err(|arrow_error| S::Error::custom(arrow_error))?;
+
+                // Write each batch to the buffer
+                for batch in record_batches {
+                    writer.write(batch)
+                        .map_err(|arrow_error| S::Error::custom(arrow_error))?;
+                }
+
+                // Finish writing to flush any remaining data
+                writer.finish()
+                    .map_err(|arrow_error| S::Error::custom(arrow_error))?;
+
+                serializer.serialize_bytes(&buffer)
+            },
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<RecordBatch>, D::Error> {
+        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+        let mut reader = StreamReader::try_new(bytes, None)
+            .map_err(|arrow_error| D::Error::custom(arrow_error))?;
+
+        let mut record_batches = Vec::new();
+        while let Some(result) = reader.next() {
+            match result {
+                Ok(record_batch) => record_batches.push(record_batch),
+                Err(error) => {
+                    return Err(D::Error::custom(format!("Failed to read record batch: {}", error)));
+                }
+            }
+        }
+
+        Ok(record_batches)
+    }
+
+    // struct RecordBatchesWrapper(pub Vec<RecordBatch>);
+    //
+    // impl Serialize for RecordBatchesWrapper {
+    //     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    //     where S: Serializer
+    //     {
+    //         // Create a stream writer with the schema from the first batch
+    //         match self.0.first() {
+    //             None => {
+    //                 serializer.serialize_bytes(&[])
+    //             },
+    //             Some(record_batch) => {
+    //                 let mut buffer = Vec::new();
+    //                 let mut writer = StreamWriter::try_new(&mut buffer, record_batch.schema_ref())
+    //                     .map_err(|arrow_error| S::Error::custom(arrow_error))?;
+    //
+    //                 // Write each batch to the buffer
+    //                 for batch in &self.0 {
+    //                     writer.write(batch)
+    //                         .map_err(|arrow_error| S::Error::custom(arrow_error))?;
+    //                 }
+    //
+    //                 // Finish writing to flush any remaining data
+    //                 writer.finish()
+    //                         .map_err(|arrow_error| S::Error::custom(arrow_error))?;
+    //
+    //                 serializer.serialize_bytes(&buffer)
+    //             },
+    //         }
+    //     }
+    // }
+    //
+    // impl <'de> Deserialize<'de> for RecordBatchesWrapper {
+    //     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    //     where D: Deserializer<'de>,
+    //     {
+    //         let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+    //         let mut reader = StreamReader::try_new(bytes, None)
+    //             .map_err(|arrow_error| D::Error::custom(arrow_error))?;
+    //
+    //         let mut record_batches = Vec::new();
+    //         while let Some(result) = reader.next() {
+    //             match result {
+    //                 Ok(record_batch) => record_batches.push(record_batch),
+    //                 Err(error) => {
+    //                     return Err(D::Error::custom(format!("Failed to read record batch: {}", error)));
+    //                 }
+    //             }
+    //         }
+    //
+    //         Ok(RecordBatchesWrapper(record_batches))
+    //     }
+    // }
+}
+
 // mod physical_expr {
 //     use arrow::datatypes::SchemaRef;
 //     use prost::Message;

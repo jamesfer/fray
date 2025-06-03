@@ -1,20 +1,17 @@
-use std::cell::{Cell, RefCell, RefMut};
+use std::cell::RefMut;
 use std::ops::DerefMut;
 use std::pin::{pin, Pin};
-use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll};
 use arrow::array::RecordBatch;
-use flume::RecvError;
 use futures::future::ready;
 use datafusion::common::DataFusionError;
 use futures::Stream;
 use futures::StreamExt;
 use futures_util::FutureExt;
 use futures_util::stream::{iter, FusedStream};
-use pin_project::pin_project;
 use crate::streaming::action_stream::Marker;
 use crate::streaming::operators::task_function::SItem;
-
+use crate::streaming::operators::utils::borrowed_stream::BorrowedStream;
 // struct Guard<'a> {
 //
 // }
@@ -97,38 +94,12 @@ struct StreamChannel<'a> {
 }
 
 impl <'a> Stream for StreamChannel<'a>
-// where R: DerefMut<Target=flume::Receiver<SItem>>
 {
     type Item = SItem;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let fut = self.channel.deref_mut().recv_async();
         pin!(fut).poll(cx).map(|result| result.ok())
-    }
-}
-
-
-struct BorrowedStream<'a, S> {
-    stream: &'a mut S,
-}
-
-impl <'a, S> BorrowedStream<'a, S>
-where
-    S: Stream<Item=SItem> + Unpin
-{
-    pub fn new(stream: &'a mut S) -> Self {
-        Self { stream }
-    }
-}
-
-impl <'a, S> Stream for BorrowedStream<'a, S>
-where
-    S: Stream<Item=SItem> + Unpin
-{
-    type Item = SItem;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.stream.poll_next_unpin(cx)
     }
 }
 
@@ -156,10 +127,6 @@ where S: Stream<Item=SItem>
             current_marker: None,
         }
     }
-
-    // pub fn s(s: impl Stream<Item=SItem>) {
-    //     let  x = s.poll_next_unpin();
-    // }
 
     // Stream record batches from the inner stream until a marker is found
     pub fn stream_record_batches<'a>(&'a mut self) -> impl Stream<Item=RecordBatch> + 'a {

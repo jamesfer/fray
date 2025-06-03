@@ -1,14 +1,7 @@
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::pin::{pin, Pin};
-use std::sync::Arc;
-use std::sync::atomic::AtomicI32;
-use std::task::{Context, Poll};
 use futures::Stream;
 use futures_util::FutureExt;
-use pin_project::pin_project;
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::{Mutex, MutexGuard, TryLockError};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 struct SharedConstructorState<F> {
     f: F,
@@ -78,13 +71,13 @@ where
 
 #[cfg(test)]
 mod lazy_tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-    use futures_util::{poll, StreamExt};
-    use tokio::time::sleep;
-    use tokio_stream::{iter, once};
     use crate::streaming::operators::utils::lazy_operator::lazily_evaluate_constructor;
+    use futures_util::StreamExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::time::sleep;
+    use tokio_stream::once;
 
     #[tokio::test]
     async fn works() {

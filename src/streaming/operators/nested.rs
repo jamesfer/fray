@@ -1,18 +1,22 @@
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::Arc;
+use crate::streaming::generation::{GenerationInputDetail, GenerationSpec};
+use crate::streaming::operators::operator::OperatorDefinition;
+use crate::streaming::operators::task_function::{CreateOperatorFunction2, OperatorFunction2, SItem};
+use crate::streaming::operators::utils::example_ref_storage::Store;
+use crate::streaming::operators::utils::fiber_stream::FiberStream;
+use crate::streaming::runtime::Runtime;
 use async_trait::async_trait;
 use datafusion::common::internal_datafusion_err;
 use datafusion::error::DataFusionError;
+use eyeball::{AsyncLock, SharedObservable};
 use futures::Stream;
 use futures::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use futures_util::TryStreamExt;
-use crate::streaming::operators::operator::OperatorDefinition;
-use crate::streaming::operators::task_function::{CreateOperatorFunction2, OperatorFunction2, SItem};
-use crate::streaming::operators::utils::example_ref_storage::Store;
-use crate::streaming::runtime::Runtime;
+use std::collections::HashMap;
+use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NestedOperator {
     inputs: Vec<(usize, String)>,
     operators: Vec<OperatorDefinition>,
@@ -56,60 +60,39 @@ struct NestedOperatorFunction {
 
 #[async_trait]
 impl OperatorFunction2 for NestedOperatorFunction {
-    // TODO add state id here
-    async fn init(&mut self, runtime: Arc<Runtime>) {
+    async fn init(
+        &mut self, 
+        runtime: Arc<Runtime>,
+        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+    ) -> Result<(), DataFusionError> {
         self.operator_functions.iter_mut()
             .map(|(_, op)| {
                 let runtime = runtime.clone();
-                async move { op.init(runtime).await }
-            })
-            .collect::<FuturesUnordered<_>>()
-            // Ignore all elements
-            .collect::<()>()
-            .await;
-    }
-
-    async fn run<'a>(
-        &'a mut self,
-        inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>,
-    ) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)> {
-        let channels = Arc::new(Store::<Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>>::new());
-
-        // Add all inputs to the channel map
-        let input_stream_id_lookup = self.input_stream_ids.iter()
-            .map(|(ordinal, stream_id)| (*ordinal, stream_id.clone()))
-            .collect::<HashMap<_, _>>();
-        for (ordinal, streams) in inputs.into_iter() {
-            let stream_id = input_stream_id_lookup.get(&ordinal)
-                .ok_or(internal_datafusion_err!("No stream id found for ordinal {}", ordinal)).unwrap();
-            channels.insert(stream_id.clone(), streams).await.unwrap();
-        }
-
-        // Start all nested operators. If this operator contains any output operators, this future
-        // will block until they are finished. For that reason, this type of nested operator cannot
-        // support a mix of some output operators and some output streams. It must either contain
-        // all output operators or all output streams.
-        self.operator_functions.iter_mut()
-            .map(|(operator_definition, operator_function)| {
-                async {
-                    run_operator(operator_definition, operator_function.as_mut(), &channels).await
-                }
+                let scheduling_details = scheduling_details.clone();
+                async move { op.init(runtime, scheduling_details).await }
             })
             .collect::<FuturesUnordered<_>>()
             .try_collect::<()>()
             .await
-            .unwrap();
+    }
 
-        // Extract the output streams from the channel map
-        self.output_stream_ids.iter()
-            .map(|(ordinal, stream_id)| {
-                async {
-                    (ordinal.clone(), channels.take(stream_id.clone()).await.unwrap())
-                }
-            })
+    async fn load(&mut self, checkpoint: usize) -> Result<(), DataFusionError> {
+        self.operator_functions.iter_mut()
+            .map(|(_, op)| async move { op.load(checkpoint).await })
             .collect::<FuturesUnordered<_>>()
-            .collect::<Vec<_>>()
+            .try_collect::<()>()
             .await
+    }
+
+    async fn run<'a>(
+        &'a mut self,
+        inputs: Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>,
+    ) -> Result<Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>, DataFusionError> {
+        run_all_operators(inputs, &self.input_stream_ids, &mut self.operator_functions, &self.output_stream_ids).await
+    }
+
+    async fn last_checkpoint(&self) -> usize {
+        todo!()
     }
 
     async fn close(mut self: Box<Self>) {
@@ -122,10 +105,54 @@ impl OperatorFunction2 for NestedOperatorFunction {
     }
 }
 
+async fn run_all_operators<'a>(
+    external_input_streams: Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>,
+    input_stream_ids: &[(usize, String)],
+    operators: &'a mut [(OperatorDefinition, Box<dyn OperatorFunction2 + Sync + Send>)],
+    output_stream_ids: &[(usize, String)]
+) -> Result<Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>, DataFusionError> {
+    let channels = Arc::new(Store::<Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>>::new());
+
+    // Add all inputs to the channel map
+    let input_stream_id_lookup = input_stream_ids.iter()
+        .map(|(ordinal, stream_id)| (*ordinal, stream_id.clone()))
+        .collect::<HashMap<_, _>>();
+    for (ordinal, streams) in external_input_streams.into_iter() {
+        let stream_id = input_stream_id_lookup.get(&ordinal)
+            .ok_or(internal_datafusion_err!("No stream id found for ordinal {}", ordinal)).unwrap();
+        channels.insert(stream_id.clone(), streams).await?;
+    }
+
+    // Start all nested operators. If this operator contains any output operators, this future
+    // will block until they are finished. For that reason, this type of nested operator cannot
+    // support a mix of some output operators and some output streams. It must either contain
+    // all output operators or all output streams.
+    operators.iter_mut()
+        .map(|(operator_definition, operator_function)| {
+            async {
+                run_operator(operator_definition, operator_function.as_mut(), &channels).await
+            }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<()>()
+        .await?;
+
+    // Extract the output streams from the channel map
+    Ok(output_stream_ids.iter()
+        .map(|(ordinal, stream_id)| {
+            async {
+                (ordinal.clone(), channels.take(stream_id.clone()).await.unwrap())
+            }
+        })
+        .collect::<FuturesUnordered<_>>()
+        .collect::<Vec<_>>()
+        .await)
+}
+
 async fn run_operator<'a, 'b>(
     operator_definition: &OperatorDefinition,
     operator_function: &'a mut (dyn OperatorFunction2 + Sync + Send),
-    channels: &'b Store<Vec<Pin<Box<dyn Stream<Item=SItem> + Sync + Send + 'a>>>>,
+    channels: &'b Store<Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>>,
 ) -> Result<(), DataFusionError>
 where 'a : 'b // a must live longer than b
 {
@@ -151,12 +178,12 @@ where 'a : 'b // a must live longer than b
 async fn temp<'a, 'b>(
     operator_definition: &OperatorDefinition,
     operator_function: &'a mut (dyn OperatorFunction2 + Sync + Send),
-    channels: &'b Store<Vec<Pin<Box<dyn Stream<Item=SItem> + Sync + Send + 'a>>>>,
-    input_streams: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Sync + Send + 'a>>>)>,
+    channels: &'b Store<Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>>,
+    input_streams: Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>,
 ) -> Result<(), DataFusionError>
 where 'a : 'b // a must live longer than b
 {
-    let outputs = operator_function.run(input_streams).await;
+    let outputs = operator_function.run(input_streams).await?;
 
     // Add the outputs to the channels
     let stream_id_lookup = operator_definition.outputs.iter()
@@ -173,16 +200,21 @@ where 'a : 'b // a must live longer than b
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use arrow::array::{ArrayRef, UInt64Array};
-    use arrow::record_batch::RecordBatch;
-    use futures_util::stream::{iter, FuturesUnordered};
-    use futures::StreamExt;
     use crate::streaming::operators::identity::IdentityOperator;
     use crate::streaming::operators::nested::NestedOperator;
     use crate::streaming::operators::operator::{OperatorDefinition, OperatorInput, OperatorOutput, OperatorSpec};
     use crate::streaming::operators::source::SourceOperator;
     use crate::streaming::operators::task_function::{CreateOperatorFunction2, OperatorFunction2, SItem};
+    use arrow::array::{ArrayRef, UInt64Array};
+    use arrow::record_batch::RecordBatch;
+    use futures::StreamExt;
+    use futures_util::stream::{iter, FuturesUnordered};
+    use std::sync::Arc;
+    use eyeball::SharedObservable;
+    use local_ip_address::local_ip;
+    use crate::streaming::generation::{GenerationInputDetail, GenerationSpec};
+    use crate::streaming::operators::utils::fiber_stream::SingleFiberStream;
+    use crate::streaming::runtime::Runtime;
 
     #[tokio::test]
     async fn test_with_one_source_operator() {
@@ -213,18 +245,28 @@ mod tests {
             vec![(0, "output".to_string())],
         );
 
+        let local_ip_address = local_ip().unwrap();
+        let runtime = Arc::new(Runtime::start(local_ip_address).await.unwrap());
+        let scheduling_details = SharedObservable::new_async((
+            Some(vec![GenerationSpec {
+                id: "1".to_string(),
+                partitions: vec![0],
+                start_conditions: vec![],
+            }]),
+            Some(vec![]),
+        ));
+
         let mut nested_func = nested.create_operator_function();
-        nested_func.init().await;
-        let outputs = nested_func.run(vec![]).await;
+        nested_func.init(runtime.clone(), scheduling_details.clone()).await.unwrap();
+        let outputs = nested_func.run(vec![]).await.unwrap();
 
         let output_values = outputs.into_iter()
-            .map(|(ordinal, outputs)| {
+            .map(|(ordinal, mut outputs)| {
                 async move {
                     (
                         ordinal,
-                        outputs.into_iter()
-                            .map(|output| output.collect::<Vec<_>>())
-                            .collect::<FuturesUnordered<_>>()
+                        Box::into_pin(outputs.combined().unwrap())
+                            // .map(|output| output.collect::<Vec<_>>())
                             .collect::<Vec<_>>()
                             .await
                     )
@@ -236,12 +278,11 @@ mod tests {
 
         assert_eq!(output_values.len(), 1);
         assert_eq!(output_values[0].0, 0);
-        assert_eq!(output_values[0].1.len(), 1);
 
-        let items = &output_values[0].1[0];
+        let items = &output_values[0].1;
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0], SItem::RecordBatch(batch1));
-        assert_eq!(items[1], SItem::RecordBatch(batch2));
+        assert_eq!(items[0].as_ref().unwrap(), &SItem::RecordBatch(batch1));
+        assert_eq!(items[1].as_ref().unwrap(), &SItem::RecordBatch(batch2));
     }
 
     #[tokio::test]
@@ -301,20 +342,29 @@ mod tests {
             vec![(0, "4".to_string())],
         );
 
-        let mut nested_func = nested.create_operator_function();
-        nested_func.init().await;
+        let local_ip_address = local_ip().unwrap();
+        let runtime = Arc::new(Runtime::start(local_ip_address).await.unwrap());
+        let scheduling_details = SharedObservable::new_async((
+            Some(vec![GenerationSpec {
+                id: "1".to_string(),
+                partitions: vec![0],
+                start_conditions: vec![],
+            }]),
+            Some(vec![]),
+        ));
 
-        let input_stream = iter(vec![SItem::RecordBatch(batch1.clone()), SItem::RecordBatch(batch2.clone())]);
-        let outputs = nested_func.run(vec![(0, vec![Box::pin(input_stream)])]).await;
+        let mut nested_func = nested.create_operator_function();
+        nested_func.init(runtime.clone(), scheduling_details.clone()).await.unwrap();
+
+        let input_stream = iter(vec![Ok(SItem::RecordBatch(batch1.clone())), Ok(SItem::RecordBatch(batch2.clone()))]);
+        let outputs = nested_func.run(vec![(0, Box::new(SingleFiberStream::new(input_stream)))]).await.unwrap();
 
         let output_values = outputs.into_iter()
-            .map(|(ordinal, outputs)| {
+            .map(|(ordinal, mut outputs)| {
                 async move {
                     (
                         ordinal,
-                        outputs.into_iter()
-                            .map(|output| output.collect::<Vec<_>>())
-                            .collect::<FuturesUnordered<_>>()
+                        Box::into_pin(outputs.combined().unwrap())
                             .collect::<Vec<_>>()
                             .await
                     )
@@ -328,9 +378,9 @@ mod tests {
         assert_eq!(output_values[0].0, 0);
         assert_eq!(output_values[0].1.len(), 1);
 
-        let items = &output_values[0].1[0];
+        let items = &output_values[0].1;
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0], SItem::RecordBatch(batch1));
-        assert_eq!(items[1], SItem::RecordBatch(batch2));
+        assert_eq!(items[0].as_ref().unwrap(), &SItem::RecordBatch(batch1));
+        assert_eq!(items[1].as_ref().unwrap(), &SItem::RecordBatch(batch2));
     }
 }

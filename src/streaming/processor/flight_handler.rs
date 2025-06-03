@@ -50,7 +50,7 @@ impl FlightHandler for ProcessorFlightHandler {
 
         let action_stream = self
             .output_manager
-            .stream_output(&ticket.stream_id, ticket.partition as usize, None)
+            .stream_output(&ticket.stream_id, ticket.partitions[0] as usize, None)
             .await
             .map_err(|e| {
                 Status::internal(format!(
@@ -60,8 +60,8 @@ impl FlightHandler for ProcessorFlightHandler {
             })?;
 
         trace!(
-            "{}, request for stream {} partition {} from {}",
-            self.processor_name, ticket.stream_id, ticket.partition, remote_addr
+            "{}, request for stream {} partition {:?} from {}",
+            self.processor_name, ticket.stream_id, ticket.partitions, remote_addr
         );
 
         let encoded_stream = encode_stream_to_flight(action_stream);

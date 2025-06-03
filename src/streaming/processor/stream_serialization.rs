@@ -1,3 +1,4 @@
+use std::error::Error;
 use crate::streaming::action_stream::{Marker, StreamItem, StreamResult};
 use crate::streaming::processor::flight_data_encoder::{FlightDataEncoderBuilder, FlightDataItem};
 use arrow::error::ArrowError;
@@ -13,11 +14,11 @@ use futures::TryStreamExt;
 use tonic::Status;
 
 pub fn encode_stream_to_flight(
-    stream: impl Stream<Item=StreamResult> + Send + 'static
+    stream: impl Stream<Item=Result<StreamItem, impl Error + Send + Sync + 'static>> + Send + 'static
 ) -> impl Stream<Item=Result<FlightData, Status>> {
     let flight_data_items = stream
         // Convert datafusion errors to arrow errors
-        .map_err(|e| FlightError::from_external_error(Box::new(e)))
+        .map_err(|e| FlightError::from_external_error(Box::new(e) as Box<dyn Error + Send + Sync>))
         // Convert stream items to flight items
         .map(|stream_result| {
             match stream_result {
@@ -29,14 +30,14 @@ pub fn encode_stream_to_flight(
 
     FlightDataEncoderBuilder::new()
         .build(Box::pin(flight_data_items))
-        .map_err(|arrow_error| {
-            Status::internal(format!("Error encoding flight data: {}", arrow_error))
+        .map_err(|flight_error| {
+            Status::internal(format!("Error encoding flight data: {}", flight_error))
         })
 }
 
 pub fn decode_flight_to_stream(
     flight_stream: FlightRecordBatchStream
-) -> impl Stream<Item=StreamResult> {
+) -> impl Stream<Item=StreamResult> + Send {
     flight_stream.into_inner()
         .map_err(|flight_error| match flight_error {
             FlightError::Arrow(arrow_error) => DataFusionError::ArrowError(arrow_error, None),

@@ -1,14 +1,24 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use datafusion_python::utils::wait_for_future;
+use local_ip_address::local_ip;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use tokio::net::TcpListener;
+use datafusion::common::internal_datafusion_err;
 use crate::flight::FlightHandler;
 use crate::streaming::checkpoint_storage_manager::CheckpointStorageManager;
+use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, TaskSchedulingDetailsUpdate};
 use crate::streaming::input_manager::InputManager;
 use crate::streaming::output_manager::OutputManager;
 use crate::streaming::processor::flight_handler::ProcessorFlightHandler;
+use crate::streaming::runtime::Runtime;
 use crate::streaming::task_definition::TaskDefinition;
+use crate::streaming::task_definition_2::TaskDefinition2;
+use crate::streaming::task_main_3::RunningTask;
 use crate::streaming::task_runner::TaskRunner;
 
 struct DFRayStreamingTaskExecutor {
@@ -95,43 +105,197 @@ impl DFRayStreamingTaskRunner {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct InitialSchedulingDetails {
+    pub generations: Vec<GenerationSpec>,
+    pub input_locations: Vec<GenerationInputDetail>,
+}
+
 pub struct WorkerProcess {
     name: String,
-    output_manager: Arc<OutputManager>,
-    checkpoint_manager: Arc<CheckpointStorageManager>,
-    runner: Arc<DFRayStreamingTaskRunner>,
+    runtime: Arc<Runtime>,
+    running_tasks: RwLock<HashMap<String, RunningTask>>,
 }
 
 impl WorkerProcess {
-    pub fn new(name: String) -> Self {
-        let output_manager = Arc::new(OutputManager::new());
-        let checkpoint_manager = Arc::new(CheckpointStorageManager::new());
-        let runner = Arc::new(DFRayStreamingTaskRunner::new(name.clone(), output_manager.clone(), checkpoint_manager.clone()));
+    pub async fn start(name: String) -> Result<Self, DataFusionError> {
+        let name = format!("[{}]", name);
+        let local_ip_addr = local_ip()
+            .map_err(|err| internal_datafusion_err!("Failed to get worker local ip: {}", err))?;
+        let runtime = Arc::new(Runtime::start(local_ip_addr).await?);
 
-        Self {
+        Ok(Self {
             name,
-            output_manager,
-            checkpoint_manager,
-            runner,
-        }
+            runtime,
+            running_tasks: RwLock::new(HashMap::new()),
+        })
     }
 
-    pub fn make_flight_handler(&self) -> Arc<dyn FlightHandler> {
-        Arc::new(ProcessorFlightHandler::new(self.name.clone(), self.output_manager.clone()))
+    pub fn data_exchange_address(&self) -> &str {
+        self.runtime.data_exchange_manager().get_exchange_address()
     }
 
-    pub fn parse_task_definition(&self, definition_bytes: &[u8]) -> Result<TaskDefinition, DataFusionError> {
-        TaskDefinition::try_decode_from_bytes(definition_bytes, &SessionContext::new())
+    #[cfg(test)]
+    pub fn get_runtime(&self) -> Arc<Runtime> {
+        self.runtime.clone()
     }
 
     pub async fn start_task(
         &self,
-        stage_id: usize,
-        output_stream_address_map: HashMap<String, String>,
-        task_def: TaskDefinition,
+        task_definition: TaskDefinition2,
+        initial_scheduling_details: InitialSchedulingDetails,
     ) -> Result<(), DataFusionError> {
-        self.runner.run_task(stage_id, output_stream_address_map, task_def).await
+        let running_task = RunningTask::start(
+            task_definition.task_id.clone(),
+            task_definition.operator,
+            self.runtime.clone(),
+            0, // initial checkpoint
+            initial_scheduling_details.input_locations,
+            initial_scheduling_details.generations,
+        ).await?;
+
+        let mut running_tasks = self.running_tasks.write();
+        match running_tasks.entry(task_definition.task_id.clone()) {
+            Entry::Occupied(_) => {
+                running_task.cancel();
+                Err(internal_datafusion_err!(
+                    "Task with ID {} is already running",
+                    task_definition.task_id
+                ))
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(running_task);
+                Ok(())
+            },
+        }
     }
 
-    pub async fn update_input(&self) {}
+    pub async fn update_input(&self, task_id: String, task_scheduling_details_update: TaskSchedulingDetailsUpdate) -> Result<(), DataFusionError> {
+        let running_tasks = self.running_tasks.read();
+        match running_tasks.get(&task_id) {
+            None => {
+                Err(internal_datafusion_err!(
+                    "No running task found with ID {}",
+                    task_id
+                ))
+            }
+            Some(running_task) => {
+                running_task.update_scheduling_details(task_scheduling_details_update).await;
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::common::record_batch;
+    use crate::streaming::generation::GenerationSpec;
+    use crate::streaming::operators::nested::NestedOperator;
+    use crate::streaming::operators::operator::{OperatorDefinition, OperatorInput, OperatorOutput, OperatorSpec};
+    use crate::streaming::operators::remote_exchange::RemoteExchangeOperator;
+    use crate::streaming::operators::source::SourceOperator;
+    use crate::streaming::operators::task_function::SItem;
+    use crate::streaming::task_definition_2::TaskDefinition2;
+    use crate::streaming::utils::create_remote_stream::create_remote_stream;
+    use crate::streaming::worker_process::{InitialSchedulingDetails, WorkerProcess};
+    use futures::StreamExt;
+    use std::future::Future;
+    use std::time::Duration;
+    use datafusion::error::DataFusionError;
+    use tokio::time::sleep;
+
+    #[tokio::test]
+    pub async fn single_output_task() {
+        let worker = WorkerProcess::start("worker1".to_string()).await.unwrap();
+
+        let test_batch = record_batch!(
+            ("a", Int32, vec![1i32, 2, 3])
+        ).unwrap();
+        let task_definition = TaskDefinition2 {
+            task_id: "task1".to_string(),
+            operator: OperatorDefinition {
+                id: "nested1".to_string(),
+                state_id: "1".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "source1".to_string(),
+                            state_id: "2".to_string(),
+                            spec: OperatorSpec::Source(SourceOperator::new(vec![test_batch.clone()])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "output1".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange1".to_string(),
+                            state_id: "3".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new("exchange_output1".to_string())),
+                            inputs: vec![OperatorInput {
+                                stream_id: "output1".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+
+        worker.start_task(
+            task_definition,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    partitions: vec![0],
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![],
+            },
+        ).await.unwrap();
+
+        // Pull the output of the exchange operator
+        let address = worker.data_exchange_address();
+        let runtime = worker.get_runtime();
+
+        let results_stream = retry_future(5, || {
+            create_remote_stream(
+                &runtime,
+                "exchange_output1",
+                address,
+                vec![0],
+            )
+        }).await.unwrap();
+        let results = Box::into_pin(results_stream).take(1).collect::<Vec<_>>().await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_ref().unwrap(), &SItem::RecordBatch(test_batch));
+    }
+
+    async fn retry_future<F, Fut, T, E>(mut retries: u32, mut f: F) -> Result<T, E>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        loop {
+            match f().await {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    if retries == 0 {
+                        return Err(e);
+                    }
+                    eprintln!("Operation failed, retrying... ({}/{}). Error: {}", retries, 5, e);
+                    retries -= 1;
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
 }

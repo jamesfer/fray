@@ -16,3 +16,4 @@ mod task_main_2;
 mod task_main_3;
 mod runtime;
 mod generation;
+pub mod task_definition_2;

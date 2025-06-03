@@ -2,24 +2,36 @@
 // - an upstream operator moves to another node, therefore changing its address
 // - autoscaling causing each operator to need to use a different set of partitions
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GenerationInputLocation {
-    offset_range: (usize, usize),
-    partitions: Vec<usize>,
+    pub address: String,
+    pub offset_range: (usize, usize),
+    pub partitions: Vec<usize>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GenerationInputDetail {
-    stream_id: String,
-    locations: Vec<GenerationInputLocation>,
+    pub stream_id: String,
+    pub locations: Vec<GenerationInputLocation>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub enum GenerationStartOffset {
     AnyTimeAfter(usize),
-    Exactly(usize),
+    // Exactly(usize),
+    // Immediately,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GenerationSpec {
-    id: String,
-    partitions: Vec<usize>,
-    starting_at: Vec<(String, GenerationStartOffset)>,
-    input_details: Vec<GenerationInputDetail>,
+    pub id: String,
+    pub partitions: Vec<usize>,
+    pub start_conditions: Vec<(String, GenerationStartOffset)>,
+}
+
+pub struct TaskSchedulingDetailsUpdate {
+    pub generation: Option<GenerationSpec>,
+    pub input_details: Option<Vec<GenerationInputDetail>>,
 }

@@ -9,12 +9,18 @@ use arrow::ipc::writer::StreamWriter;
 use async_trait::async_trait;
 use datafusion::common::DataFusionError;
 use std::sync::Arc;
+use eyeball::{AsyncLock, SharedObservable};
+use flume::Receiver;
 use futures::Stream;
 use futures::stream::iter;
+use serde::{Deserialize, Serialize};
+use crate::streaming::generation::{GenerationInputDetail, GenerationSpec};
+use crate::streaming::operators::utils::fiber_stream::{FiberStream, SingleFiberStream};
 use crate::streaming::runtime::Runtime;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SourceOperator {
+    #[serde(with = "crate::streaming::utils::serde_serialization::record_batches")]
     data: Vec<RecordBatch>,
 }
 
@@ -131,15 +137,31 @@ impl TaskFunction for SourceTask {
 
 #[async_trait]
 impl OperatorFunction2 for SourceTask {
-    async fn init(&mut self, _runtime: Arc<Runtime>) {
-        // No-op
+    async fn init(
+        &mut self,
+        _runtime: Arc<Runtime>,
+        _scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+    ) -> Result<(), DataFusionError> {
+        Ok(())
     }
 
-    async fn run<'a>(&'a mut self, inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)> {
+    async fn load(&mut self, _checkpoint: usize) -> Result<(), DataFusionError> {
+        Ok(())
+    }
+
+    async fn run<'a>(
+        &'a mut self,
+        inputs: Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>,
+    ) -> Result<Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>, DataFusionError> {
         assert_eq!(inputs.len(), 0, "Source operator should not have any inputs");
 
-        let record_batch_stream = iter(self.data.iter().map(|batch| SItem::RecordBatch(batch.clone())));
-        vec![(0, vec![Box::pin(record_batch_stream)])]
+        let record_batch_iter = self.data.iter()
+            .map(|batch| Ok(SItem::RecordBatch(batch.clone())));
+        Ok(vec![(0, Box::new(SingleFiberStream::new(iter(record_batch_iter))))])
+    }
+
+    async fn last_checkpoint(&self) -> usize {
+        0
     }
 
     async fn close(self: Box<Self>) {

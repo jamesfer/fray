@@ -33,7 +33,7 @@ impl InputManager {
         let address = self.stream_id_map.get(input_stream_id).ok_or(internal_datafusion_err!("Stream ID not found"))?;
         let client = self.client_map.get(address).ok_or(internal_datafusion_err!("Client not found"))?;
         let inner_ticket = StreamingFlightTicketData {
-            partition: partition as u64,
+            partitions: vec![partition as u64],
             stream_id: input_stream_id.to_string(),
         };
         let ticket = Ticket { ticket: Bytes::from(inner_ticket.encode_to_vec()) };
@@ -47,7 +47,7 @@ impl InputManager {
         // TODO start client if one doesn't exist
         let client = self.client_map.get(address).ok_or(internal_datafusion_err!("Client not found"))?;
         let inner_ticket = StreamingFlightTicketData {
-            partition: partition as u64,
+            partitions: vec![partition as u64],
             stream_id: input_stream_id.to_string(),
         };
         let ticket = Ticket { ticket: Bytes::from(inner_ticket.encode_to_vec()) };

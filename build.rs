@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::path::Path;
-
 fn main() -> Result<(), String> {
     use std::io::Write;
 
@@ -39,11 +37,19 @@ fn main() -> Result<(), String> {
 
     // We don't include the proto files in releases so that downstreams
     // do not need to have PROTOC included
-    if Path::new("src/proto/datafusion_ray.proto").exists() {
-        println!("cargo:rerun-if-changed=src/proto/datafusion_common.proto");
-        println!("cargo:rerun-if-changed=src/proto/datafusion.proto");
-        println!("cargo:rerun-if-changed=src/proto/datafusion_ray.proto");
+    if in_dir.join(proto_files[0].0).exists() {
+        println!("cargo:rerun-if-changed=src/proto/src/datafusion_common.proto");
+        println!("cargo:rerun-if-changed=src/proto/src/datafusion.proto");
+        println!("cargo:rerun-if-changed=src/proto/src/datafusion_ray.proto");
         for (file, _, _) in proto_files {
+            println!("cargo:rerun-if-changed={}", in_dir.join(file).display());
+        }
+
+        // Other dependencies
+        for file in [
+            "datafusion_common.proto",
+            "datafusion.proto",
+        ] {
             println!("cargo:rerun-if-changed={}", in_dir.join(file).display());
         }
 

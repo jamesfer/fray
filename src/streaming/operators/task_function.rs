@@ -5,9 +5,12 @@ use datafusion::arrow::record_batch::RecordBatch;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use eyeball::{AsyncLock, SharedObservable};
+use flume::Receiver;
 use datafusion::common::DataFusionError;
 use futures::Stream;
-use crate::streaming::generation::GenerationSpec;
+use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, TaskSchedulingDetailsUpdate};
+use crate::streaming::operators::utils::fiber_stream::FiberStream;
 use crate::streaming::runtime::Runtime;
 
 pub type OutputChannel = OutputChannelL<'static>;
@@ -68,13 +71,29 @@ pub enum UpdateGenerationError {
 
 #[async_trait]
 pub trait OperatorFunction2 {
-    // TODO somehow make it possible to call this while other methods are running
-    // async fn update_generation(&self, generation: GenerationSpec) -> Result<(), UpdateGenerationError> {
+    // TODO add state id here
+    // Called strictly once before any other function 
+    async fn init(
+        &mut self, 
+        runtime: Arc<Runtime>,
+        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+    ) -> Result<(), DataFusionError>;
+    
+    // Called each time the generations or input details are updated. Is called before the operator
+    // starts running with the initial locations of the inputs and initial generations. It is also 
+    // often called while the operator is running.
+    // async fn update_scheduling_details(
+    //     &self, 
+    //     new_generations: Option<Vec<GenerationSpec>>, 
+    //     input_locations: Option<Vec<GenerationInputDetail>>,
+    // ) -> Result<(), UpdateGenerationError> {
     //     Ok(())
     // }
     
-    async fn init(&mut self, runtime: Arc<Runtime>);
-    // async fn load(&mut self, checkpoint: usize, partitions: Vec<usize>) -> ();
+    // Called each time, the operator needs to jump to a checkpoint, including when the operator
+    // first starts, even if the operator is starting from the beginning.
+    async fn load(&mut self, checkpoint: usize) -> Result<(), DataFusionError>;
+    
     // Source operators would have no inputs defined, so inputs would be an empty slice
     // The majority of operators would only take a single input stream per ordinal, and only return
     // a single output per ordinal (and the majority of those would only return one output stream).
@@ -105,29 +124,40 @@ pub trait OperatorFunction2 {
     // generation marker, rather than the marker that the task started with. In turn, the operator
     // agrees that once it polls a stream, it must support consuming its contents at some point
     // before processing a generation marker.
-    // TODO add errors to the return streams
-    // TODO use non mutable ref
     async fn run<'a>(
         &'a mut self,
-        inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>,
-    ) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>;
+        inputs: Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>,
+    ) -> Result<Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>, DataFusionError>;
     // Lists the most recently completed checkpoint. Used to know where the operator should resume
     // from when it needs to restart or reset back in time.
-    // async fn last_checkpoint(&self) -> usize;
+    // TODO what about stateless operators?
+    async fn last_checkpoint(&self) -> usize;
     async fn close(self: Box<Self>);
 }
 
 #[async_trait]
 impl OperatorFunction2 for Box<dyn OperatorFunction2 + Sync + Send> {
-    async fn init(&mut self, runtime: Arc<Runtime>) {
-        self.as_mut().init(runtime).await;
+    async fn init(
+        &mut self, 
+        runtime: Arc<Runtime>,
+        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+    ) -> Result<(), DataFusionError> {
+        self.as_mut().init(runtime, scheduling_details).await
+    }
+
+    async fn load(&mut self, checkpoint: usize) -> Result<(), DataFusionError> {
+        self.as_mut().load(checkpoint).await
     }
 
     async fn run<'a>(
         &'a mut self,
-        inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)>,
-    ) -> Vec<(usize, Vec<Pin<Box<dyn Stream<Item=SItem> + Send + Sync + 'a>>>)> {
+        inputs: Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>,
+    ) -> Result<Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>, DataFusionError> {
         self.as_mut().run(inputs).await
+    }
+
+    async fn last_checkpoint(&self) -> usize {
+        self.as_ref().last_checkpoint().await
     }
 
     async fn close(self: Box<Self>) {
@@ -144,6 +174,17 @@ pub trait CreateOperatorFunction2 {
 }
 
 
+
+
+// Idea to separate the runtime part of the operator, that could use mutable data, from the part
+// that needs shared access. This could be returned from the init operator
+pub trait OperatorFunctionRun {
+    async fn load(&mut self, checkpoint: usize, partitions: Vec<usize>) -> Result<(), DataFusionError>;
+    async fn run<'a>(
+        &'a mut self,
+        inputs: Vec<(usize, Vec<Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>>>)>,
+    ) -> Result<Vec<(usize, Vec<Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>>>)>, DataFusionError>;
+}
 
 // Task lifecycle
 // init()
