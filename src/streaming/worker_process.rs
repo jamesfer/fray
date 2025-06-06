@@ -101,7 +101,7 @@ impl DFRayStreamingTaskRunner {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct InitialSchedulingDetails {
     pub generations: Vec<GenerationSpec>,
     pub input_locations: Vec<GenerationInputDetail>,
@@ -129,11 +129,6 @@ impl WorkerProcess {
 
     pub fn data_exchange_address(&self) -> &str {
         self.runtime.data_exchange_manager().get_exchange_address()
-    }
-
-    #[cfg(test)]
-    pub fn get_runtime(&self) -> Arc<Runtime> {
-        self.runtime.clone()
     }
 
     pub async fn start_task(
@@ -180,6 +175,11 @@ impl WorkerProcess {
                 Ok(())
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn get_runtime(&self) -> Arc<Runtime> {
+        self.runtime.clone()
     }
 }
 

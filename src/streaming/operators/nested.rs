@@ -35,6 +35,10 @@ impl NestedOperator {
             outputs,
         }
     }
+
+    pub fn get_operators(&self) -> &[OperatorDefinition] {
+        &self.operators
+    }
 }
 
 impl CreateOperatorFunction2 for NestedOperator {

@@ -40,6 +40,7 @@ pub mod stage_reader;
 pub mod streaming;
 pub mod util;
 pub mod streaming_processor_service;
+mod entrypoint;
 
 #[pymodule]
 fn _datafusion_ray_internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -51,6 +52,9 @@ fn _datafusion_ray_internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<streaming_processor_service::DFRayStreamingProcessorService>()?;
     m.add_class::<util::LocalValidator>()?;
     m.add_function(wrap_pyfunction!(util::prettify, m)?)?;
+    m.add_function(wrap_pyfunction!(entrypoint::get_tasks, m)?)?;
+    m.add_function(wrap_pyfunction!(entrypoint::schedule_without_partitions, m)?)?;
+    m.add_function(wrap_pyfunction!(entrypoint::collect, m)?)?;
     Ok(())
 }
 

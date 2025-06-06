@@ -27,6 +27,16 @@ pub struct RemoteSourceOperator {
     stream_ids: Vec<String>,
 }
 
+impl RemoteSourceOperator {
+    pub fn new(stream_ids: Vec<String>) -> Self {
+        Self { stream_ids }
+    }
+
+    pub fn get_stream_ids(&self) -> &[String] {
+        &self.stream_ids
+    }
+}
+
 impl CreateOperatorFunction2 for RemoteSourceOperator {
     fn create_operator_function(&self) -> Box<dyn OperatorFunction2 + Sync + Send> {
         Box::new(RemoteSourceOperatorFunction::new(self.stream_ids.clone()))

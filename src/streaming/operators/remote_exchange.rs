@@ -22,6 +22,10 @@ impl RemoteExchangeOperator {
     pub fn new(stream_id: String) -> Self {
         Self { stream_id }
     }
+
+    pub fn get_stream_id(&self) -> &str {
+        &self.stream_id
+    }
 }
 
 impl CreateOperatorFunction2 for RemoteExchangeOperator {
