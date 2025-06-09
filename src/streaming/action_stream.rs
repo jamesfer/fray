@@ -11,9 +11,10 @@ use std::task::{Context, Poll};
 use bytes::Buf;
 use futures::Stream;
 use prost::{DecodeError, Message};
+use serde::{Deserialize, Serialize};
 use crate::proto::generated::streaming as proto;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Marker {
     pub checkpoint_number: u64,
 }
@@ -31,10 +32,14 @@ impl Marker {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum StreamItem {
     Marker(Marker),
-    RecordBatch(RecordBatch),
+    RecordBatch(
+        #[serde(with = "crate::streaming::utils::serde_serialization::record_batch")]
+        RecordBatch
+    ),
+
 }
 
 #[derive(Clone)]
@@ -213,45 +218,3 @@ impl Stream for MergedActionStream {
         Poll::Ready(None)
     }
 }
-
-// #[pin_project::pin_project]
-// pub struct NoMarkers<S> {
-//     schema: SchemaRef,
-//     #[pin]
-//     inner_stream: S
-// }
-//
-// impl NoMarkers<SendableRecordBatchStream> {
-//     pub fn from_datafusion_stream(inner_stream: SendableRecordBatchStream) -> Self
-//     {
-//         Self {
-//             schema: inner_stream.schema(),
-//             inner_stream
-//         }
-//     }
-// }
-//
-// impl <S> Stream for NoMarkers<S>
-// where
-//     S: Stream<Item=datafusion::common::Result<RecordBatch>>,
-// {
-//     type Item = Result<datafusion::common::Result<RecordBatch>, Marker>;
-//
-//     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-//         let this = self.project();
-//
-//         match this.inner_stream.poll_next(cx) {
-//             Poll::Pending => Poll::Pending,
-//             Poll::Ready(None) => Poll::Ready(None),
-//             Poll::Ready(Some(value)) => Poll::Ready(Some(Ok(value))),
-//         }
-//     }
-// }
-//
-// impl <S> ActionStream for NoMarkers<S>
-// where S: Stream<Item=datafusion::common::Result<RecordBatch>>
-// {
-//     fn schema(&self) -> SchemaRef {
-//         self.schema.clone()
-//     }
-// }

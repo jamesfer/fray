@@ -109,7 +109,10 @@ impl DFRayContext {
     pub fn sql(&self, py: Python, query: String) -> PyResult<DFRayDataFrame> {
         let df = wait_for_future(py, self.ctx.sql(&query))?;
 
-        Ok(DFRayDataFrame::new(df))
+        // Ok(DFRayDataFrame::new(df))
+        Err(pyo3::exceptions::PyNotImplementedError::new_err(
+            "DFRayDataFrame is not implemented yet",
+        ))
     }
 
     pub fn set(&self, option: String, value: String) -> PyResult<()> {

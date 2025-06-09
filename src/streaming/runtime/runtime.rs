@@ -1,7 +1,7 @@
 use datafusion::common::DataFusionError;
 use std::net::IpAddr;
 use crate::streaming::runtime::data_client_manager::DataClientManager;
-use crate::streaming::runtime::data_exchange_manager::DataExchangeManager;
+use crate::streaming::runtime::DataExchangeManager;
 
 pub struct Runtime {
     data_client_manager: DataClientManager,

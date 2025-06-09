@@ -1,24 +1,11 @@
-use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
 use std::collections::{HashMap, VecDeque};
-use futures::Stream;
-use async_trait::async_trait;
-use datafusion::common::DataFusionError;
-use tonic::{Request, Response, Status};
-use arrow_flight::Ticket;
-use std::net::IpAddr;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use arrow_flight::flight_service_server::FlightServiceServer;
-use tonic::transport::Server;
 use std::mem;
 use std::ops::{Deref, DerefMut};
-use futures_util::TryFutureExt;
-use prost::Message;
-use crate::flight::{DoGetStream, FlightHandler, FlightServ};
-use crate::proto::generated::streaming::StreamingFlightTicketData;
+use std::sync::Arc;
+use futures::Stream;
+use tokio::sync::{Notify, RwLock};
+use datafusion::common::{internal_datafusion_err, DataFusionError};
 use crate::streaming::action_stream::StreamItem;
-use crate::streaming::processor::stream_serialization::encode_stream_to_flight;
 
 struct DataChannelState {
     data: RwLock<(VecDeque<StreamItem>, Option<Arc<Notify>>)>,
@@ -68,7 +55,6 @@ impl DataChannelSender {
 
 impl Drop for DataChannelSender {
     fn drop(&mut self) {
-        // TODO cancel the channel
         let mut status = self.state.status.write().unwrap();
         *status = ChannelStatus::Cancelled {
             last_checkpoint: self.last_checkpoint,
@@ -77,7 +63,6 @@ impl Drop for DataChannelSender {
     }
 }
 
-// #[derive(Clone)]
 enum ChannelStatus {
     Running,
     Finished,
@@ -109,7 +94,7 @@ impl DataChannel {
     }
 
     // This is explicitly marked as 'static to tell rust that it doesn't use the lifetime of &self
-    pub fn stream(&self) -> impl Stream<Item=Result<StreamItem, Arc<DataFusionError>>> + Sync + Send + 'static {
+    pub fn stream(&self) -> impl Stream<Item=Result<StreamItem, Arc<DataFusionError>>> + Sync + Send + 'static + use<> {
         let state = self.state.clone();
 
         futures_util::stream::try_unfold(0, move |index| {
@@ -179,12 +164,12 @@ struct OutputStream {
     partitions: Vec<usize>,
 }
 
-struct ExchangeChannelStore {
+pub struct ExchangeChannelStore {
     channels: RwLock<HashMap<String, OutputStream>>,
 }
 
 impl ExchangeChannelStore {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             channels: RwLock::new(HashMap::new()),
         }
@@ -201,121 +186,66 @@ impl ExchangeChannelStore {
         channels.insert(stream_id, output_stream);
         sender
     }
-}
 
-pub struct DataExchangeManager {
-    listening_address: String,
-    exchange_channel_store: Arc<ExchangeChannelStore>,
-    close_signal_sender: Option<tokio::sync::oneshot::Sender<()>>,
-    handle: JoinHandle<Result<(), DataFusionError>>,
-}
-
-impl DataExchangeManager {
-    pub async fn start(local_ip_address: IpAddr) -> Result<Self, DataFusionError> {
-        let listener = Self::create_listener(local_ip_address).await?;
-        let listening_address = listener.local_addr()
-            .map_err(|e| DataFusionError::External(Box::new(e)))?
-            .to_string();
-
-        let exchange_channel_store = Arc::new(ExchangeChannelStore::new());
-        let exchange_service = DataExchangeFlightService {
-            exchange_channel_store: exchange_channel_store.clone(),
-        };
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let flight_service_handle = Self::start_flight_service(listener, exchange_service, receiver).await?;
-
-        Ok(Self {
-            listening_address,
-            exchange_channel_store,
-            close_signal_sender: Some(sender),
-            handle: flight_service_handle,
-        })
-    }
-
-    pub fn get_exchange_address(&self) -> &str {
-        self.listening_address.as_str()
-    }
-
-    pub async fn create_channel(&self, stream_id: String, partitions: Vec<usize>) -> DataChannelSender {
-        self.exchange_channel_store.create(stream_id, partitions).await
-    }
-
-    async fn create_listener(local_ip_address: IpAddr) -> Result<TcpListener, DataFusionError> {
-        TcpListener::bind(&format!("{local_ip_address}:0"))
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))
-    }
-
-    async fn start_flight_service(
-        listener: TcpListener,
-        exchange_service: DataExchangeFlightService,
-        close_signal: tokio::sync::oneshot::Receiver<()>,
-    ) -> Result<JoinHandle<Result<(), DataFusionError>>, DataFusionError>{
-        let flight_server = FlightServiceServer::new(FlightServ {
-            handler: Arc::new(exchange_service),
-        });
-
-        let close_signal_future = async move {
-            // Whether the close signal finishes with an error or not, we will shut down the server
-            close_signal.await.unwrap_or(())
-        };
-
-        let result = tokio::spawn(
-            Server::builder()
-                .add_service(flight_server)
-                .serve_with_incoming_shutdown(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                    close_signal_future,
-                )
-                .map_err(|transport_error| DataFusionError::External(Box::new(transport_error)))
-        );
-        Ok(result)
-    }
-
-    pub fn close(&mut self) {
-        match self.close_signal_sender.take() {
-            None => println!("Close signal sender was already taken, ignoring close request."),
-            Some(sender) => {
-                match sender.send(()) {
-                    Ok(_) => {}
-                    Err(_) => println!("Failed to send close signal, it may have already been closed.")
-                }
-            }
+    pub async fn stream(&self, stream_id: &str, partitions: &[usize]) -> Result<impl Stream<Item=Result<StreamItem, Arc<DataFusionError>>> + Sync + Send + use<>, DataFusionError> {
+        let channels = self.channels.read().await;
+        let channel = channels.get(stream_id)
+            .ok_or_else(|| internal_datafusion_err!("No channel found for stream id: {}", stream_id))?;
+        if channel.partitions != partitions {
+            // TODO, when we have better partitioning support, allow for partial matches of
+            // partitions
+            return Err(internal_datafusion_err!(
+                "Requested partitions {:?} do not match available partitions {:?}",
+                partitions, channel.partitions
+            ));
         }
+        Ok(channel.channel.stream())
     }
 }
 
-struct DataExchangeFlightService {
-    exchange_channel_store: Arc<ExchangeChannelStore>,
-}
+#[cfg(test)]
+mod tests {
+    use futures_util::StreamExt;
+    use datafusion::common::record_batch;
+    use crate::streaming::action_stream::StreamItem;
+    use crate::streaming::runtime::exchange_manager::data_channels::ExchangeChannelStore;
 
-#[async_trait]
-impl FlightHandler for DataExchangeFlightService {
-    async fn get_stream(&self, request: Request<Ticket>) -> Result<Response<DoGetStream>, Status> {
-        let bytes = request.into_inner().ticket;
-        let ticket = StreamingFlightTicketData::decode(bytes)
-            .map_err(|decode_error| {
-                Status::invalid_argument(format!("Failed to decode ticket data: {}", decode_error))
-            })?;
+    #[tokio::test]
+    async fn fails_when_stream_id_does_not_exist() {
+        let store = ExchangeChannelStore::new();
+        let _sender = store.create("test_stream".to_string(), vec![0]).await;
+        let result = store.stream("other_stream", &[0]).await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("No channel found for stream id: other_stream"));
+    }
 
-        // TODO
-        let request_checkpoint = 123usize;
-        let request_stream_id = ticket.stream_id;
-        let request_partitions = ticket.partitions.into_iter().map(|p| p as usize).collect::<Vec<_>>();
+    #[tokio::test]
+    async fn fails_when_partitions_do_not_match() {
+        let store = ExchangeChannelStore::new();
+        let _sender = store.create("test_stream".to_string(), vec![0]).await;
+        let result = store.stream("test_stream", &[1]).await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("Requested partitions [1] do not match available partitions [0]"));
+    }
 
-        let data_stream = {
-            let channels = self.exchange_channel_store.channels.read().await;
-            let channel = channels.get(&request_stream_id)
-                .ok_or_else(|| Status::not_found(format!("No channel found for stream id: {}", request_stream_id)))?;
-            if channel.partitions != request_partitions {
-                return Err(Status::not_found(format!(
-                    "Requested partitions {:?} do not match available partitions {:?}",
-                    request_partitions, channel.partitions
-                )));
-            }
-            channel.channel.stream()
-        };
+    #[tokio::test]
+    async fn can_create_and_stream_from_channel() {
+        let record_batch_1 = record_batch!(("a", Int32, vec![1, 2, 3])).unwrap();
+        let record_batch_2 = record_batch!(("a", Int32, vec![4, 5, 6])).unwrap();
+        let store = ExchangeChannelStore::new();
 
-        Ok(Response::new(Box::pin(encode_stream_to_flight(data_stream))))
+        // Ensure the sender is dropped
+        {
+            let mut sender = store.create("test_stream".to_string(), vec![0]).await;
+            sender.send(Ok(StreamItem::RecordBatch(record_batch_1.clone()))).await;
+            sender.send(Ok(StreamItem::RecordBatch(record_batch_2.clone()))).await;
+        }
+
+        // Stream the items
+        let mut stream = Box::pin(store.stream("test_stream", &[0]).await.unwrap());
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), StreamItem::RecordBatch(record_batch_1));
+        assert_eq!(stream.next().await.unwrap().unwrap(), StreamItem::RecordBatch(record_batch_2));
+        assert!(stream.next().await.is_none());
     }
 }

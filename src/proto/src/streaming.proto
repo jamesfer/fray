@@ -10,6 +10,7 @@ message StreamingFlightTicketData {
   string stream_id = 1;
   // partitions of the stream
   repeated uint64 partitions = 2;
+  uint64 checkpoint_number = 3;
 }
 
 message Marker {

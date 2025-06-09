@@ -22,6 +22,8 @@ pub async fn create_remote_stream_no_runtime(
     let ticket_data = StreamingFlightTicketData {
         partitions: partitions.into_iter().map(|p| p as u64).collect(),
         stream_id: stream_id.to_string(),
+        // TODO
+        checkpoint_number: 0,
     };
     let flight_ticket = Ticket { ticket: Bytes::from(ticket_data.encode_to_vec()) };
     let client = Arc::new(Mutex::new(make_client(address).await?));
@@ -48,6 +50,8 @@ pub async fn create_remote_stream(
     let ticket_data = StreamingFlightTicketData {
         partitions: partitions.into_iter().map(|p| p as u64).collect(),
         stream_id: stream_id.to_string(),
+        // TODO
+        checkpoint_number: 0,
     };
     let flight_ticket = Ticket { ticket: Bytes::from(ticket_data.encode_to_vec()) };
     let client = runtime.data_client_manager().get_client(address).await?;

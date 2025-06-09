@@ -1,13 +1,8 @@
 use crate::flight::FlightHandler;
-use crate::streaming::checkpoint_storage_manager::CheckpointStorageManager;
 use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, TaskSchedulingDetailsUpdate};
-use crate::streaming::input_manager::InputManager;
-use crate::streaming::output_manager::OutputManager;
 use crate::streaming::runtime::Runtime;
-use crate::streaming::task_definition::TaskDefinition;
 use crate::streaming::task_definition_2::TaskDefinition2;
 use crate::streaming::task_main_3::RunningTask;
-use crate::streaming::task_runner::TaskRunner;
 use datafusion::common::internal_datafusion_err;
 use datafusion::error::DataFusionError;
 use local_ip_address::local_ip;
@@ -16,90 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-struct DFRayStreamingTaskExecutor {
-    stage_id: usize,
-    output_stream_address_map: HashMap<String, String>,
-    task_runner: TaskRunner,
-}
-
-impl DFRayStreamingTaskExecutor {
-    pub fn start(
-        stage_id: usize,
-        output_stream_address_map: HashMap<String, String>,
-        task_definition: TaskDefinition,
-        input_manager: Arc<InputManager>,
-        output_manager: Arc<OutputManager>,
-        checkpoint_storage_manager: Arc<CheckpointStorageManager>,
-    ) -> Result<Self, DataFusionError> {
-        let function = task_definition.spec.into_task_function();
-        let task_runner = TaskRunner::start(
-            format!("stage_{}", stage_id),
-            function,
-            task_definition.inputs,
-            task_definition.output_stream_id,
-            task_definition.output_schema,
-            task_definition.output_partitioning,
-            task_definition.checkpoint_id,
-            None,
-            input_manager,
-            output_manager,
-            checkpoint_storage_manager,
-        );
-
-        Ok(Self {
-            stage_id,
-            output_stream_address_map,
-            task_runner,
-        })
-    }
-}
-
-struct DFRayStreamingTaskRunner {
-    /// our name, useful for logging
-    name: String,
-    /// Inner state of the handler
-    inner: RwLock<Option<DFRayStreamingTaskExecutor>>,
-    /// Output channels
-    output_manager: Arc<OutputManager>,
-    checkpoint_storage_manager: Arc<CheckpointStorageManager>,
-}
-
-impl DFRayStreamingTaskRunner {
-    pub fn new(name: String, output_manager: Arc<OutputManager>, checkpoint_storage_manager: Arc<CheckpointStorageManager>) -> Self {
-        let inner = RwLock::new(None);
-
-        Self {
-            name,
-            inner,
-            output_manager,
-            checkpoint_storage_manager,
-        }
-    }
-
-    async fn run_task(
-        &self,
-        stage_id: usize,
-        output_stream_address_map: HashMap<String, String>,
-        task_definition: TaskDefinition,
-    ) -> Result<(), DataFusionError> {
-        let input_manager = Arc::new(InputManager::new(output_stream_address_map.clone()).await?);
-
-        // Wait to start the executor until we can acquire the lock
-        let inner_ref = &mut *self.inner.write();
-        let inner = DFRayStreamingTaskExecutor::start(
-            stage_id,
-            output_stream_address_map,
-            task_definition,
-            input_manager,
-            self.output_manager.clone(),
-            self.checkpoint_storage_manager.clone(),
-        )?;
-        inner_ref.replace(inner);
-
-        Ok(())
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct InitialSchedulingDetails {
@@ -185,20 +96,20 @@ impl WorkerProcess {
 
 #[cfg(test)]
 mod tests {
-    use crate::streaming::generation::GenerationSpec;
+    use crate::streaming::action_stream::{Marker, StreamItem};
+    use crate::streaming::generation::{GenerationInputDetail, GenerationInputLocation, GenerationSpec};
     use crate::streaming::operators::nested::NestedOperator;
     use crate::streaming::operators::operator::{OperatorDefinition, OperatorInput, OperatorOutput, OperatorSpec};
     use crate::streaming::operators::remote_exchange::RemoteExchangeOperator;
+    use crate::streaming::operators::remote_source::remote_source::RemoteSourceOperator;
     use crate::streaming::operators::source::SourceOperator;
     use crate::streaming::operators::task_function::SItem;
     use crate::streaming::task_definition_2::TaskDefinition2;
-    use crate::streaming::utils::create_remote_stream::create_remote_stream;
+    use crate::streaming::utils::create_remote_stream::{create_remote_stream, create_remote_stream_no_runtime};
+    use crate::streaming::utils::retry::retry_future;
     use crate::streaming::worker_process::{InitialSchedulingDetails, WorkerProcess};
     use datafusion::common::record_batch;
     use futures::StreamExt;
-    use std::future::Future;
-    use std::time::Duration;
-    use tokio::time::sleep;
 
     #[tokio::test]
     pub async fn single_output_task() {
@@ -273,24 +184,134 @@ mod tests {
         assert_eq!(results[0].as_ref().unwrap(), &SItem::RecordBatch(test_batch));
     }
 
-    async fn retry_future<F, Fut, T, E>(mut retries: u32, mut f: F) -> Result<T, E>
-    where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = Result<T, E>>,
-        E: std::fmt::Display,
-    {
-        loop {
-            match f().await {
-                Ok(res) => return Ok(res),
-                Err(e) => {
-                    if retries == 0 {
-                        return Err(e);
-                    }
-                    eprintln!("Operation failed, retrying... ({}/{}). Error: {}", retries, 5, e);
-                    retries -= 1;
-                    sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
+    #[tokio::test]
+    pub async fn two_linked_tasks() {
+        let worker1 = WorkerProcess::start("worker1".to_string()).await.unwrap();
+        let worker2 = WorkerProcess::start("worker2".to_string()).await.unwrap();
+
+        let test_batch = record_batch!(
+            ("a", Int32, vec![1i32, 2, 3])
+        ).unwrap();
+        let source_task = TaskDefinition2 {
+            task_id: "task1".to_string(),
+            operator: OperatorDefinition {
+                id: "nested1".to_string(),
+                state_id: "1".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "source1".to_string(),
+                            state_id: "2".to_string(),
+                            spec: OperatorSpec::Source(SourceOperator::new_with_markers(vec![
+                                StreamItem::Marker(Marker { checkpoint_number: 1 }),
+                                StreamItem::RecordBatch(test_batch.clone()),
+                                StreamItem::Marker(Marker { checkpoint_number: 2 }),
+                            ])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "output1".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange1".to_string(),
+                            state_id: "3".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new("exchange_output1".to_string())),
+                            inputs: vec![OperatorInput {
+                                stream_id: "output1".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+        let exchange_task = TaskDefinition2 {
+            task_id: "task2".to_string(),
+            operator: OperatorDefinition {
+                id: "nested2".to_string(),
+                state_id: "4".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "exchange2".to_string(),
+                            state_id: "5".to_string(),
+                            spec: OperatorSpec::RemoteExchangeInput(RemoteSourceOperator::new(vec!["exchange_output1".to_string()])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "output2".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange3".to_string(),
+                            state_id: "6".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new("exchange_output2".to_string())),
+                            inputs: vec![OperatorInput {
+                                stream_id: "output2".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+
+        let address1 = worker1.data_exchange_address();
+        let address2 = worker2.data_exchange_address();
+        worker1.start_task(
+            source_task,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    partitions: vec![0],
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![],
+            },
+        ).await.unwrap();
+        worker2.start_task(
+            exchange_task,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    partitions: vec![0],
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![GenerationInputDetail {
+                    stream_id: "exchange_output1".to_string(),
+                    locations: vec![GenerationInputLocation {
+                        address: address1.to_string(),
+                        offset_range: (0, 2 << 31),
+                        partitions: vec![0],
+                    }],
+                }],
+            },
+        ).await.unwrap();
+
+        // Pull the output of the exchange operator
+        let results_stream = retry_future(5, || {
+            create_remote_stream_no_runtime(
+                "exchange_output2",
+                address2,
+                vec![0],
+            )
+        }).await.unwrap();
+        let results = Box::into_pin(results_stream).take(3).collect::<Vec<_>>().await;
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 1 }));
+        assert_eq!(results[1].as_ref().unwrap(), &SItem::RecordBatch(test_batch));
+        assert_eq!(results[2].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
     }
 }

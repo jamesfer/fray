@@ -39,6 +39,27 @@ use serde::de::{Error, Visitor};
 //     }
 // }
 
+pub mod record_batch {
+    use std::slice;
+    use arrow_array::RecordBatch;
+    use serde::{Deserializer, Serializer};
+    use serde::de::Error;
+    use crate::streaming::utils::serde_serialization::record_batches;
+
+    pub fn serialize<S: Serializer>(record_batches: &RecordBatch, serializer: S) -> Result<S::Ok, S::Error> {
+        record_batches::serialize(slice::from_ref(record_batches), serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RecordBatch, D::Error> {
+        let mut vec = record_batches::deserialize(deserializer)?;
+        match vec.len() {
+            1 => Ok(vec.pop().unwrap()),
+            0 => Err(Error::custom("Cannot deserialize a record batch from an empty stream")),
+            _ => Err(Error::custom("Found more than one record batch when deserializing the stream")),
+        }
+    }
+}
+
 pub mod record_batches {
     use arrow::array::RecordBatch;
     use arrow::ipc::reader::StreamReader;

@@ -7,6 +7,8 @@ pub struct StreamingFlightTicketData {
     /// partitions of the stream
     #[prost(uint64, repeated, tag = "2")]
     pub partitions: ::prost::alloc::vec::Vec<u64>,
+    #[prost(uint64, tag = "3")]
+    pub checkpoint_number: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

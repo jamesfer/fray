@@ -1,17 +1,15 @@
 use crate::streaming::action_stream::StreamItem;
 use crate::streaming::generation::{GenerationInputDetail, GenerationSpec};
 use crate::streaming::operators::task_function::{CreateOperatorFunction2, OperatorFunction2, SItem};
+use crate::streaming::operators::utils::fiber_stream::FiberStream;
 use crate::streaming::runtime::{DataChannelSender, Runtime};
 use async_trait::async_trait;
 use datafusion::common::DataFusionError;
 use eyeball::{AsyncLock, SharedObservable, Subscriber};
-use futures::Stream;
 use futures_util::StreamExt;
-use std::pin::Pin;
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::streaming::operators::utils::fiber_stream::FiberStream;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RemoteExchangeOperator {
