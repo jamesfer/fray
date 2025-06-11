@@ -218,6 +218,7 @@ mod tests {
     use local_ip_address::local_ip;
     use crate::streaming::generation::{GenerationInputDetail, GenerationSpec};
     use crate::streaming::operators::utils::fiber_stream::SingleFiberStream;
+    use crate::streaming::partitioning::PartitionRange;
     use crate::streaming::runtime::Runtime;
 
     #[tokio::test]
@@ -254,7 +255,7 @@ mod tests {
         let scheduling_details = SharedObservable::new_async((
             Some(vec![GenerationSpec {
                 id: "1".to_string(),
-                partitions: vec![0],
+                partitions: PartitionRange::unit(),
                 start_conditions: vec![],
             }]),
             Some(vec![]),
@@ -351,7 +352,7 @@ mod tests {
         let scheduling_details = SharedObservable::new_async((
             Some(vec![GenerationSpec {
                 id: "1".to_string(),
-                partitions: vec![0],
+                partitions: PartitionRange::unit(),
                 start_conditions: vec![],
             }]),
             Some(vec![]),

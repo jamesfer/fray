@@ -18,9 +18,10 @@ use prost::Message;
 use crate::flight::{DoGetStream, FlightHandler, FlightServ};
 use crate::proto::generated::streaming::StreamingFlightTicketData;
 use crate::streaming::action_stream::StreamItem;
+use crate::streaming::partitioning::PartitionRange;
 use crate::streaming::processor::stream_serialization::encode_stream_to_flight;
 use crate::streaming::runtime::DataChannelSender;
-use crate::streaming::runtime::exchange_manager::data_channels::ExchangeChannelStore;
+use crate::streaming::runtime::exchange_manager::data_channels::{ChannelPartitioningDetails, ExchangeChannelStore};
 
 pub struct DataExchangeManager {
     listening_address: String,
@@ -55,8 +56,8 @@ impl DataExchangeManager {
         self.listening_address.as_str()
     }
 
-    pub async fn create_channel(&self, stream_id: String, partitions: Vec<usize>) -> DataChannelSender {
-        self.exchange_channel_store.create(stream_id, partitions).await
+    pub async fn create_channel(&self, stream_id: String, partitioning_details: Option<ChannelPartitioningDetails>) -> DataChannelSender {
+        self.exchange_channel_store.create(stream_id, partitioning_details).await
     }
 
     async fn create_listener(local_ip_address: IpAddr) -> Result<TcpListener, DataFusionError> {
@@ -123,7 +124,9 @@ impl FlightHandler for DataExchangeFlightService {
         // TODO
         let request_checkpoint = 123usize;
         let request_stream_id = ticket.stream_id;
-        let request_partitions = ticket.partitions.into_iter().map(|p| p as usize).collect::<Vec<_>>();
+        let request_partitions = ticket.partitions
+            .map(|partitions| partitions.into())
+            .unwrap_or(PartitionRange::empty());
 
         let data_stream = self.exchange_channel_store.stream(&request_stream_id, &request_partitions).await
             .map_err(|e| Status::not_found(format!("Failed to get stream: {}", e)))?;

@@ -129,6 +129,7 @@ flatbuffers = "24.12.23"
 crossbeam = "0.8.4"
 flume = "0.11.1"
 eyeball = { version = "0.8.8", features = ["async-lock"] }
+ahash = "0.8.11"
 
 [build-dependencies]
 prost-types = "0.13"

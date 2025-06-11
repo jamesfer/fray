@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use datafusion::common::DataFusionError;
 use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, GenerationStartOffset};
+use crate::streaming::partitioning::PartitionRange;
 
 pub fn find_current_generation<'a>(
     stream_ids: &[String],
@@ -27,12 +28,11 @@ pub fn find_current_generation<'a>(
 }
 
 pub fn get_addresses<'a>(
-    partitions: &[usize],
+    partitions: &PartitionRange,
     checkpoint: usize,
     stream_ids: &[String],
     input_details: &[GenerationInputDetail],
-) -> Result<Vec<(String, String, Vec<usize>)>, DataFusionError> { // returns (stream_id, address, partitions)
-    let partitions_set: HashSet<_> = partitions.iter().copied().collect();
+) -> Result<Vec<(String, String, PartitionRange)>, DataFusionError> { // returns (stream_id, address, partitions)
     Ok(stream_ids.iter()
         .map(|stream_id| {
             input_details.iter()
@@ -41,7 +41,7 @@ pub fn get_addresses<'a>(
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|input_detail| get_addresses_for_stream(&partitions_set, checkpoint, input_detail))
+        .map(|input_detail| get_addresses_for_stream(&partitions, checkpoint, input_detail))
         .collect::<Result<Vec<_>, DataFusionError>>()?
         // Flatten
         .into_iter()
@@ -50,37 +50,38 @@ pub fn get_addresses<'a>(
 }
 
 fn get_addresses_for_stream(
-    partitions: &HashSet<usize>,
+    partitions: &PartitionRange,
     checkpoint: usize,
     input_details: &GenerationInputDetail,
-) -> Result<Vec<(String, String, Vec<usize>)>, DataFusionError> { // returns (stream_id, address, partitions)
-    let mut all_found_partitions = HashSet::new();
+) -> Result<Vec<(String, String, PartitionRange)>, DataFusionError> { // returns (stream_id, address, partitions)
+    let mut all_found_partitions = Vec::new();
     let addresses = input_details.locations.iter()
         // Check that the location range includes the checkpoint
         .filter(|location| location.offset_range.0 <= checkpoint && location.offset_range.1 > checkpoint)
         // Check that the partitions overlap
         .filter_map(|location| {
-            let location_partitions_set = location.partitions.iter().copied().collect();
-            let overlapping_partitions = partitions.intersection(&location_partitions_set)
-                .copied()
-                .collect::<Vec<_>>();
-            if overlapping_partitions.is_empty() {
-                None
+            if location.partitions.is_empty() && partitions.is_empty() {
+                Some((input_details.stream_id.clone(), location.address.clone(), PartitionRange::empty()))
             } else {
-                all_found_partitions.extend(overlapping_partitions.iter().copied());
-                Some((input_details.stream_id.clone(), location.address.clone(), overlapping_partitions))
+                let overlapping_partitions = partitions.intersection(&location.partitions);
+                if overlapping_partitions.is_empty() {
+                    None
+                } else {
+                    all_found_partitions.push(overlapping_partitions.clone());
+                    Some((input_details.stream_id.clone(), location.address.clone(), overlapping_partitions))
+                }
             }
         })
         .collect::<Vec<_>>();
 
     // Check that we actually found all the partitions
-    let missing_partitions = partitions.iter()
-        .filter(|partition| !all_found_partitions.contains(partition))
-        .collect::<Vec<_>>();
-    if !missing_partitions.is_empty() {
+    let found_partition_count = all_found_partitions.iter()
+        .map(|partition| partition.size())
+        .sum::<usize>();
+    if found_partition_count != partitions.size() {
         return Err(DataFusionError::Execution(format!(
-            "Missing partitions {:?} for stream {} at checkpoint {}",
-            missing_partitions, input_details.stream_id, checkpoint
+            "Missing partitions for stream {} at checkpoint {}. Expected: {:?}, Found: {:?}",
+            input_details.stream_id, checkpoint, partitions, found_partition_count
         )));
     }
 

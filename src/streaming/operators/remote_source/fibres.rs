@@ -16,6 +16,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use crate::streaming::partitioning::PartitionRange;
 
 pub struct RunningStream {
     runtime: Arc<Runtime>,
@@ -48,7 +49,7 @@ impl RunningStream {
     fn make_fibers_for_all_addresses<'a>(
         runtime: &'a Arc<Runtime>,
         stored_existing_fibers: &'a mut Option<HashMap<(String, String), RunningFiber>>,
-        addresses: Vec<(String, String, Vec<usize>)>,
+        addresses: Vec<(String, String, PartitionRange)>,
     ) -> &'a mut HashMap<(String, String), RunningFiber> {
         // Reuse the existing fibres where possible
         let (mut existing_fibers, new_addresses) = match stored_existing_fibers.take() {
@@ -61,7 +62,7 @@ impl RunningStream {
 
         // Create new fibres for the new addresses
         for (stream_id, address, partitions) in new_addresses {
-            let fiber = RunningFiber::new(runtime.clone(), stream_id.clone(), address);
+            let fiber = RunningFiber::new(runtime.clone(), stream_id.clone(), address, partitions.clone());
             existing_fibers.push((stream_id, fiber, partitions));
         }
 
@@ -142,9 +143,9 @@ async fn run_fiber_with_lifetimes<'a>(
 }
 
 fn intersect_addresses_and_fibers(
-    addresses: &[(String, String, Vec<usize>)], // (stream_id, address, partitions)
+    addresses: &[(String, String, PartitionRange)], // (stream_id, address, partitions)
     mut fibers: HashMap<(String, String), RunningFiber>,
-) -> (Vec<(String, RunningFiber, Vec<usize>)>, Vec<(String, String, Vec<usize>)>) {
+) -> (Vec<(String, RunningFiber, PartitionRange)>, Vec<(String, String, PartitionRange)>) {
     let mut existing_fibers = Vec::new();
     let mut new_addresses = Vec::new();
     for (stream_id, address, partitions) in addresses {
@@ -167,34 +168,27 @@ struct RunningFiber {
     runtime: Arc<Runtime>,
     stream_id: String,
     address: String,
-    current_partitions: Option<Vec<usize>>,
+    current_partitions: PartitionRange,
     // TODO generation markers shouldn't be here.
     remote_stream: Option<Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync>>>,
 }
 
 impl RunningFiber {
-    pub fn new(runtime: Arc<Runtime>, stream_id: String, address: String) -> Self {
+    pub fn new(runtime: Arc<Runtime>, stream_id: String, address: String, range: PartitionRange) -> Self {
         Self {
             runtime,
             stream_id,
             address,
-            current_partitions: None,
+            current_partitions: range,
             remote_stream: None,
         }
     }
 
-    pub fn load(&mut self, partitions: Vec<usize>) {
-        match &self.current_partitions {
-            None => {
-                self.current_partitions = Some(partitions);
-            }
-            Some(current_partitions) => {
-                if current_partitions != &partitions {
-                    // Clear the remote stream since we need to recreate it
-                    self.remote_stream = None;
-                    self.current_partitions = Some(partitions);
-                }
-            }
+    pub fn load(&mut self, partitions: PartitionRange) {
+        if self.current_partitions != partitions {
+            // Clear the remote stream since we need to recreate it
+            self.remote_stream = None;
+            self.current_partitions = partitions;
         }
     }
 
@@ -204,8 +198,7 @@ impl RunningFiber {
     ) -> Result<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'b>, DataFusionError>
     where 'a: 'b
     {
-        // TODO don't panic here
-        let current_partitions = self.current_partitions.clone().unwrap();
+        let current_partitions = self.current_partitions.clone();
         let remote_stream = if self.remote_stream.is_none() {
             let stream = retry_future(10, || create_remote_stream::create_remote_stream(
                 &self.runtime,
@@ -261,6 +254,10 @@ impl RunningFiber {
             // Flatten errors back into the stream
             .map(|result| result.unwrap_or_else(|err| RunningFiberCheckMarker::Item(Err(err))));
         Self::strip_stream_instructions(stream)
+            .map(|item| {
+                println!("Exchange source received item: {:?}", item);
+                return item;
+            })
     }
 
     fn insert_stream_instructions<'a>(

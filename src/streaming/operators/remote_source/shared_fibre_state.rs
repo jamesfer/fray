@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::streaming::operators::remote_source::barrier_with_result::BarrierWithResult;
+use crate::streaming::partitioning::PartitionRange;
 
 #[derive(Clone, PartialEq)]
 pub enum FiberState {
@@ -22,13 +23,13 @@ pub struct SharedFiberState<'a> {
     stream_ids: &'a [String],
     scheduling_details_state: &'a SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
     current_generation_id: String,
-    current_partitions: Vec<usize>,
-    current_addresses: Vec<(String, String, Vec<usize>)>,
+    current_partitions: PartitionRange,
+    current_addresses: Vec<(String, String, PartitionRange)>,
     shared_trigger_state: BarrierWithResult<FiberState>,
     // Even though we have a mutable reference to the last_completed_marker, we need to use a Mutex
     // so we can change it through a shared reference. Some finagling could avoid this.
     last_completed_marker: Arc<std::sync::Mutex<usize>>,
-    currently_waiting_on_marker: Mutex<Option<usize>>
+    currently_waiting_on_marker: Arc<std::sync::Mutex<Option<usize>>>
 }
 
 impl <'a> SharedFiberState<'a> {
@@ -37,8 +38,8 @@ impl <'a> SharedFiberState<'a> {
         stream_ids: &'a [String],
         scheduling_details_state: &'a SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
         current_generation_id: String,
-        current_partitions: Vec<usize>,
-        current_addresses: Vec<(String, String, Vec<usize>)>,
+        current_partitions: PartitionRange,
+        current_addresses: Vec<(String, String, PartitionRange)>,
     ) -> Self {
         let shared_trigger_state = BarrierWithResult::new(current_addresses.len());
         Self {
@@ -49,14 +50,14 @@ impl <'a> SharedFiberState<'a> {
             current_addresses,
             shared_trigger_state,
             last_completed_marker,
-            currently_waiting_on_marker: Mutex::new(None),
+            currently_waiting_on_marker: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     pub async fn poll_fiber_state(&self, marker: usize) -> Result<FiberState, DataFusionError> {
         // Update the marker we are currently waiting for
         {
-            let mut guard = self.currently_waiting_on_marker.lock().await;
+            let mut guard = self.currently_waiting_on_marker.lock().unwrap();
             match *guard {
                 None => {
                     *guard = Some(marker);
@@ -81,14 +82,22 @@ impl <'a> SharedFiberState<'a> {
             let current_generation_id = self.current_generation_id.clone();
             let current_addresses = self.current_addresses.clone();
             let last_completed_marker = self.last_completed_marker.clone();
+            let currently_waiting_on_marker = self.currently_waiting_on_marker.clone();
 
             move || async move {
                 {
                     // We lock the marker here, but we are guaranteed to be the only thread attempting
                     // to do so.
-                    let mut guard = last_completed_marker.lock().unwrap();
+                    let mut guard = last_completed_marker.try_lock().unwrap();
                     *guard = marker;
-                    println!("Updating last completed marker: {}", marker);
+                    println!("Updated last completed marker: {}", marker);
+                }
+
+                {
+                    // Same story here, we should be the only thread trying to update this marker.
+                    let mut guard = currently_waiting_on_marker.try_lock().unwrap();
+                    // Reset the current marker to none
+                    *guard = None;
                 }
 
                 Self::check_generation_and_addresses(
@@ -110,7 +119,7 @@ impl <'a> SharedFiberState<'a> {
         scheduling_details_state: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
         stream_ids: Vec<String>,
         current_generation_id: String,
-        current_addresses: Vec<(String, String, Vec<usize>)>,
+        current_addresses: Vec<(String, String, PartitionRange)>,
         marker: usize,
     ) -> Result<FiberState, DataFusionError> {
         let (generations, input_details) = scheduling_details_state.get().await;

@@ -3,12 +3,13 @@
 // - autoscaling causing each operator to need to use a different set of partitions
 
 use serde::{Deserialize, Serialize};
+use crate::streaming::partitioning::PartitionRange;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GenerationInputLocation {
     pub address: String,
     pub offset_range: (usize, usize),
-    pub partitions: Vec<usize>,
+    pub partitions: PartitionRange,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ pub enum GenerationStartOffset {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GenerationSpec {
     pub id: String,
-    pub partitions: Vec<usize>,
+    pub partitions: PartitionRange,
     pub start_conditions: Vec<(String, GenerationStartOffset)>,
 }
 

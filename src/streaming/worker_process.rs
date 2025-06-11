@@ -96,6 +96,8 @@ impl WorkerProcess {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use futures::stream::FuturesOrdered;
     use crate::streaming::action_stream::{Marker, StreamItem};
     use crate::streaming::generation::{GenerationInputDetail, GenerationInputLocation, GenerationSpec};
     use crate::streaming::operators::nested::NestedOperator;
@@ -108,8 +110,10 @@ mod tests {
     use crate::streaming::utils::create_remote_stream::{create_remote_stream, create_remote_stream_no_runtime};
     use crate::streaming::utils::retry::retry_future;
     use crate::streaming::worker_process::{InitialSchedulingDetails, WorkerProcess};
-    use datafusion::common::record_batch;
-    use futures::StreamExt;
+    use datafusion::common::{record_batch, DataFusionError};
+    use futures::{Stream, StreamExt};
+    use datafusion::physical_expr::expressions::col;
+    use crate::streaming::partitioning::{PartitionRange, PartitioningSpec};
 
     #[tokio::test]
     pub async fn single_output_task() {
@@ -159,7 +163,7 @@ mod tests {
             InitialSchedulingDetails {
                 generations: vec![GenerationSpec {
                     id: "gen1".to_string(),
-                    partitions: vec![0],
+                    partitions: PartitionRange::empty(),
                     start_conditions: vec![],
                 }],
                 input_locations: vec![],
@@ -175,7 +179,7 @@ mod tests {
                 &runtime,
                 "exchange_output1",
                 address,
-                vec![0],
+                PartitionRange::empty(),
             )
         }).await.unwrap();
         let results = Box::into_pin(results_stream).take(1).collect::<Vec<_>>().await;
@@ -274,7 +278,7 @@ mod tests {
             InitialSchedulingDetails {
                 generations: vec![GenerationSpec {
                     id: "gen1".to_string(),
-                    partitions: vec![0],
+                    partitions: PartitionRange::empty(),
                     start_conditions: vec![],
                 }],
                 input_locations: vec![],
@@ -285,7 +289,7 @@ mod tests {
             InitialSchedulingDetails {
                 generations: vec![GenerationSpec {
                     id: "gen1".to_string(),
-                    partitions: vec![0],
+                    partitions: PartitionRange::empty(),
                     start_conditions: vec![],
                 }],
                 input_locations: vec![GenerationInputDetail {
@@ -293,7 +297,7 @@ mod tests {
                     locations: vec![GenerationInputLocation {
                         address: address1.to_string(),
                         offset_range: (0, 2 << 31),
-                        partitions: vec![0],
+                        partitions: PartitionRange::empty(),
                     }],
                 }],
             },
@@ -304,7 +308,7 @@ mod tests {
             create_remote_stream_no_runtime(
                 "exchange_output2",
                 address2,
-                vec![0],
+                PartitionRange::empty(),
             )
         }).await.unwrap();
         let results = Box::into_pin(results_stream).take(3).collect::<Vec<_>>().await;
@@ -313,5 +317,251 @@ mod tests {
         assert_eq!(results[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 1 }));
         assert_eq!(results[1].as_ref().unwrap(), &SItem::RecordBatch(test_batch));
         assert_eq!(results[2].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
+    }
+
+    #[tokio::test]
+    pub async fn partitioned_output() {
+        let worker1 = WorkerProcess::start("worker1".to_string()).await.unwrap();
+        let worker2 = WorkerProcess::start("worker2".to_string()).await.unwrap();
+        let worker3 = WorkerProcess::start("worker3".to_string()).await.unwrap();
+
+        let test_batch = record_batch!(
+            ("a", Int32, vec![1i32, 2, 3]),
+            ("b", Int32, vec![111i32, 222, 333])
+        ).unwrap();
+        let source_task = TaskDefinition2 {
+            task_id: "task1".to_string(),
+            operator: OperatorDefinition {
+                id: "nested1".to_string(),
+                state_id: "1".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "source1".to_string(),
+                            state_id: "2".to_string(),
+                            spec: OperatorSpec::Source(SourceOperator::new_with_markers(vec![
+                                StreamItem::Marker(Marker { checkpoint_number: 1 }),
+                                StreamItem::RecordBatch(test_batch.clone()),
+                                StreamItem::Marker(Marker { checkpoint_number: 2 }),
+                            ])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "output1".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange1".to_string(),
+                            state_id: "3".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new_with_partitioning(
+                                "exchange_output1".to_string(),
+                                test_batch.schema(),
+                                PartitioningSpec {
+                                    expressions: vec![col("a", test_batch.schema_ref().as_ref()).unwrap()],
+                                },
+                            )),
+                            inputs: vec![OperatorInput {
+                                stream_id: "output1".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+        let exchange_task1 = TaskDefinition2 {
+            task_id: "task2".to_string(),
+            operator: OperatorDefinition {
+                id: "nested2".to_string(),
+                state_id: "4".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "exchange2".to_string(),
+                            state_id: "5".to_string(),
+                            spec: OperatorSpec::RemoteExchangeInput(RemoteSourceOperator::new(vec!["exchange_output1".to_string()])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "output2".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange3".to_string(),
+                            state_id: "6".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new("exchange_output2".to_string())),
+                            inputs: vec![OperatorInput {
+                                stream_id: "output2".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+        let exchange_task2 = TaskDefinition2 {
+            task_id: "task3".to_string(),
+            operator: OperatorDefinition {
+                id: "nested3".to_string(),
+                state_id: "7".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "exchange4".to_string(),
+                            state_id: "8".to_string(),
+                            spec: OperatorSpec::RemoteExchangeInput(RemoteSourceOperator::new(vec!["exchange_output1".to_string()])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "output3".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange5".to_string(),
+                            state_id: "9".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new("exchange_output3".to_string())),
+                            inputs: vec![OperatorInput {
+                                stream_id: "output3".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+
+        let address1 = worker1.data_exchange_address();
+        let address2 = worker2.data_exchange_address();
+        let address3 = worker3.data_exchange_address();
+
+        worker1.start_task(
+            source_task,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    partitions: PartitionRange::new(0, 2, 2),
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![],
+            },
+        ).await.unwrap();
+
+        let input_detail = GenerationInputDetail {
+            stream_id: "exchange_output1".to_string(),
+            locations: vec![GenerationInputLocation {
+                address: address1.to_string(),
+                offset_range: (0, 2 << 31),
+                partitions: PartitionRange::new(0, 2, 2),
+            }],
+        };
+        // This task takes 1 half of the partitions
+        worker2.start_task(
+            exchange_task1,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    // The generation dictates which partitions this task should process
+                    partitions: PartitionRange::new_from_index(0, 2),
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![input_detail.clone()],
+            },
+        ).await.unwrap();
+        // This task takes the other half of the partitions
+        worker3.start_task(
+            exchange_task2,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    // The generation dictates which partitions this task should process
+                    partitions: PartitionRange::new_from_index(1, 2),
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![input_detail],
+            },
+        ).await.unwrap();
+
+        // Pull the output each of the exchange operators. We don't need to specify a
+        // partition range here, as they are independent streams
+        let results_stream1_fut = retry_future(5, || async {
+            create_remote_stream_no_runtime(
+                "exchange_output2",
+                address2,
+                PartitionRange::empty(),
+            ).await
+                .map(Box::into_pin)
+                .map(|stream| {
+                    Box::pin(stream.map(|result| {
+                        match &result {
+                            Ok(SItem::RecordBatch(record_batch)) => {
+                                println!("Stream1 Received record batch: {:?}", record_batch);
+                            },
+                            Ok(SItem::Marker(marker)) => {
+                                println!("Stream1 Received marker: {:?}", marker);
+                            },
+                            _ => {}
+                        }
+                        result
+                    })) as Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync>>
+                })
+        });
+        let results_stream2_fut = retry_future(5, || async {
+            create_remote_stream_no_runtime(
+                "exchange_output3",
+                address3,
+                PartitionRange::empty(),
+            ).await
+                .map(Box::into_pin)
+                .map(|stream| {
+                    Box::pin(stream.map(|result| {
+                        match &result {
+                            Ok(SItem::RecordBatch(record_batch)) => {
+                                println!("Stream2 Received record batch: {:?}", record_batch);
+                            },
+                            Ok(SItem::Marker(marker)) => {
+                                println!("Stream2 Received marker: {:?}", marker);
+                            },
+                            _ => {}
+                        }
+                        result
+                    })) as Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync>>
+                })
+        });
+
+        let mut r = vec![
+            Box::pin(results_stream1_fut) as Pin<Box<dyn Future<Output=Result<Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync>>, DataFusionError>>>>,
+            Box::pin(results_stream2_fut) as Pin<Box<dyn Future<Output=Result<Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync>>, DataFusionError>>>>,
+        ]
+            .into_iter()
+            .collect::<FuturesOrdered<_>>()
+            .collect::<Vec<_>>()
+            .await;
+        let results_stream2 = r.pop().unwrap().unwrap();
+        let results_stream1 = r.pop().unwrap().unwrap();
+        let results1 = results_stream1.collect::<Vec<_>>().await;
+        let results2 = results_stream2.collect::<Vec<_>>().await;
+
+        println!("Received results 1: {:?}", results1);
+        println!("Received results 2: {:?}", results2);
+
+        assert_eq!(results1.len(), 3);
+        // assert_eq!(results[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 1 }));
+        // assert_eq!(results[1].as_ref().unwrap(), &SItem::RecordBatch(test_batch));
+        // assert_eq!(results[2].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
     }
 }
