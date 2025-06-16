@@ -59,14 +59,25 @@ impl RunningTask {
 
         // State the operator's main loop in a separate task
         let function = operator.spec.create_operator_function();
-        let handle = spawn(operator_main_loop(
-            task_id.clone(),
-            function,
-            runtime,
-            initial_checkpoint,
-            state.clone(),
-            scheduling_details.clone(),
-        ));
+        let handle = spawn({
+            let state = state.clone();
+            let scheduling_details = scheduling_details.clone();
+            async move {
+                let result = operator_main_loop(
+                    task_id.clone(),
+                    function,
+                    runtime,
+                    initial_checkpoint,
+                    state,
+                    scheduling_details,
+                ).await;
+                match &result {
+                    Ok(_) => println!("Task {} completed successfully", task_id),
+                    Err(err) => println!("Task {} failed: {}", task_id, err),
+                }
+                result
+            }
+        });
 
 
 
@@ -123,14 +134,15 @@ async fn operator_main_loop(
     // Main loop
     let mut checkpoint = initial_checkpoint;
     loop {
+        println!("Task {}: Loading checkpoint {}", task_id, checkpoint);
         function.load(checkpoint).await?;
 
         // Since the root task doesn't have any outputs, the future should wait to resolve until the
         // entire task completes
-        // TODO once run() can return a result, remove the needless wrapping here
 
         // Run the function in a block to make the lifetime explicit
         let error = {
+            println!("Task {}: Running", task_id);
             match function.run(vec![]).await {
                 Ok(outputs) => {
                     assert_eq!(outputs.len(), 0);

@@ -110,8 +110,9 @@ tokio = { version = "1.43", features = [
   "rt-multi-thread",
   "sync",
   "time",
+  "fs",
 ] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1.17", features = ["fs"] }
 
 tonic = { version = "0.12.3", default-features = false, features = [
   "transport",
@@ -130,6 +131,7 @@ crossbeam = "0.8.4"
 flume = "0.11.1"
 eyeball = { version = "0.8.8", features = ["async-lock"] }
 ahash = "0.8.11"
+rocksdb = "0.23.0"
 
 [build-dependencies]
 prost-types = "0.13"

@@ -220,6 +220,7 @@ mod tests {
     use crate::streaming::operators::utils::fiber_stream::SingleFiberStream;
     use crate::streaming::partitioning::PartitionRange;
     use crate::streaming::runtime::Runtime;
+    use crate::streaming::utils::test_utils::make_test_runtime;
 
     #[tokio::test]
     async fn test_with_one_source_operator() {
@@ -250,8 +251,7 @@ mod tests {
             vec![(0, "output".to_string())],
         );
 
-        let local_ip_address = local_ip().unwrap();
-        let runtime = Arc::new(Runtime::start(local_ip_address).await.unwrap());
+        let runtime = make_test_runtime().await.unwrap();
         let scheduling_details = SharedObservable::new_async((
             Some(vec![GenerationSpec {
                 id: "1".to_string(),
@@ -347,8 +347,7 @@ mod tests {
             vec![(0, "4".to_string())],
         );
 
-        let local_ip_address = local_ip().unwrap();
-        let runtime = Arc::new(Runtime::start(local_ip_address).await.unwrap());
+        let runtime = make_test_runtime().await.unwrap();
         let scheduling_details = SharedObservable::new_async((
             Some(vec![GenerationSpec {
                 id: "1".to_string(),

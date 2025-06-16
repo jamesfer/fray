@@ -12,7 +12,11 @@ pub trait FiberStream: Send + Sync {
     // TODO how to indicate that the stream is complete (probably an empty vector)
     async fn pull<'a>(&'a mut self) -> Result<Vec<Box<dyn Stream<Item=Self::Item> + Sync + Send + 'a>>, DataFusionError>;
 
-    fn combined<'a>(&'a mut self) -> Result<Box<dyn Stream<Item=Self::Item> + Sync + Send + 'a>, DataFusionError> {
+    fn combined<'a>(mut self: Box<Self>) -> Result<Box<dyn Stream<Item=Self::Item> + Sync + Send + 'a>, DataFusionError>
+    where
+        Self: 'a,
+        Self::Item: 'a
+    {
         Ok(Box::new(stream! {
             loop {
                 // TODO handle errors properly

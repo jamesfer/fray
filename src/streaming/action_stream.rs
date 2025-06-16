@@ -39,7 +39,18 @@ pub enum StreamItem {
         #[serde(with = "crate::streaming::utils::serde_serialization::record_batch")]
         RecordBatch
     ),
+}
 
+impl From<RecordBatch> for StreamItem {
+    fn from(batch: RecordBatch) -> Self {
+        StreamItem::RecordBatch(batch)
+    }
+}
+
+impl From<Marker> for StreamItem {
+    fn from(marker: Marker) -> Self {
+        StreamItem::Marker(marker)
+    }
 }
 
 #[derive(Clone)]

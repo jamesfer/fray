@@ -355,7 +355,7 @@ impl OperatorFunction2 for RemoteExchangeOperatorFunction {
 
         assert_eq!(inputs.len(), 1, "RemoteExchangeOperatorFunction should only have one input");
         let mut input_stream = inputs.pop().unwrap().1;
-        let mut combined_stream = Box::into_pin(input_stream.as_mut().combined()?);
+        let mut combined_stream = Box::into_pin(input_stream.combined()?);
         while let Some(result) = combined_stream.next().await {
             match result {
                 Ok(SItem::Generation(_)) => {

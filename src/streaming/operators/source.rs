@@ -62,7 +62,21 @@ impl OperatorFunction2 for SourceOperatorFunction {
         Ok(())
     }
 
-    async fn load(&mut self, _checkpoint: usize) -> Result<(), DataFusionError> {
+    async fn load(&mut self, checkpoint: usize) -> Result<(), DataFusionError> {
+        // Move the offset to the matching marker in the static list
+        if checkpoint > 0 {
+            let (index, _) = self.items.iter().enumerate()
+                .find(|(_, item)| match item {
+                    StreamItem::Marker(marker) => marker.checkpoint_number as usize == checkpoint,
+                    _ => false,
+                })
+                .ok_or_else(|| DataFusionError::Execution(format!("No marker found for checkpoint {}", checkpoint)))?;
+            self.offset = index;
+            println!("SourceOperatorFunction: Loaded checkpoint {} at offset {}", checkpoint, self.offset);
+        } else {
+            self.offset = 0;
+        }
+
         Ok(())
     }
 
@@ -72,7 +86,8 @@ impl OperatorFunction2 for SourceOperatorFunction {
     ) -> Result<Vec<(usize, Box<dyn FiberStream<Item=Result<SItem, DataFusionError>> + Send + Sync + 'a>)>, DataFusionError> {
         assert_eq!(inputs.len(), 0, "Source operator should not have any inputs");
 
-        let record_batch_iter = self.items.iter()
+        println!("SourceOperatorFunction: Running from offset {}", self.offset);
+        let record_batch_iter = self.items[self.offset..].iter()
             .map(|batch| {
                 match batch {
                     StreamItem::RecordBatch(batch) => Ok(SItem::RecordBatch(batch.clone())),

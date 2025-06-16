@@ -10,3 +10,4 @@ mod utils;
 pub mod operator;
 pub mod remote_source;
 pub mod remote_exchange;
+pub mod count_star;

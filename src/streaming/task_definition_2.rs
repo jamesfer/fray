@@ -20,6 +20,7 @@ impl TaskDefinition2 {
         match operator {
             OperatorSpec::Identity(_) => vec![],
             OperatorSpec::Source(_) => vec![],
+            OperatorSpec::CountStar(_) => vec![],
             OperatorSpec::RemoteExchangeInput(_) => vec![],
             OperatorSpec::RemoteExchangeOutput(output) => vec![output.get_stream_id().to_string()],
             OperatorSpec::Nested(nested) => nested.get_operators().iter()
@@ -32,6 +33,7 @@ impl TaskDefinition2 {
         match operator {
             OperatorSpec::Identity(_) => vec![],
             OperatorSpec::Source(_) => vec![],
+            OperatorSpec::CountStar(_) => vec![],
             OperatorSpec::RemoteExchangeOutput(_) => vec![],
             OperatorSpec::RemoteExchangeInput(input) => input.get_stream_ids().iter().cloned().collect(),
             OperatorSpec::Nested(nested) => nested.get_operators().iter()
