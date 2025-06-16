@@ -135,6 +135,7 @@ mod tests {
     use futures::stream::FuturesOrdered;
     use futures::{Stream, StreamExt};
     use std::pin::Pin;
+    use tokio::{join, select, try_join};
 
     #[tokio::test]
     pub async fn single_output_task() {
@@ -562,26 +563,28 @@ mod tests {
                 })
         });
 
-        let mut r = vec![
-            Box::pin(results_stream1_fut) as Pin<Box<dyn Future<Output=Result<Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync>>, DataFusionError>>>>,
-            Box::pin(results_stream2_fut) as Pin<Box<dyn Future<Output=Result<Pin<Box<dyn Stream<Item=Result<SItem, DataFusionError>> + Send + Sync>>, DataFusionError>>>>,
-        ]
-            .into_iter()
-            .collect::<FuturesOrdered<_>>()
-            .collect::<Vec<_>>()
-            .await;
-        let results_stream2 = r.pop().unwrap().unwrap();
-        let results_stream1 = r.pop().unwrap().unwrap();
-        let results1 = results_stream1.collect::<Vec<_>>().await;
-        let results2 = results_stream2.collect::<Vec<_>>().await;
+        // Wait for two futures to complete in parallel
+        let (results_stream1, results_stream2) = try_join!(results_stream1_fut, results_stream2_fut).unwrap();
+        let (results1, results2) = join!(results_stream1.collect::<Vec<_>>(), results_stream2.collect::<Vec<_>>());
 
         println!("Received results 1: {:?}", results1);
         println!("Received results 2: {:?}", results2);
 
         assert_eq!(results1.len(), 3);
-        // assert_eq!(results[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 1 }));
-        // assert_eq!(results[1].as_ref().unwrap(), &SItem::RecordBatch(test_batch));
-        // assert_eq!(results[2].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
+        assert_eq!(results1[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 1 }));
+        assert_eq!(results1[1].as_ref().unwrap(), &SItem::RecordBatch(record_batch!(
+            ("a", Int32, vec![3i32]),
+            ("b", Int32, vec![333i32])
+        ).unwrap()));
+        assert_eq!(results1[2].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
+
+        assert_eq!(results2.len(), 3);
+        assert_eq!(results2[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 1 }));
+        assert_eq!(results2[1].as_ref().unwrap(), &SItem::RecordBatch(record_batch!(
+            ("a", Int32, vec![1i32, 2]),
+            ("b", Int32, vec![111i32, 222])
+        ).unwrap()));
+        assert_eq!(results2[2].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
     }
 
     #[tokio::test]
