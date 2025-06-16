@@ -58,8 +58,8 @@ impl OperatorFunction2 for CountStarFunction {
         let state = RocksDBStateBackend::open_new(
             "count_star_state".to_string(),
             initial_generation.partitions.clone(),
-            runtime.local_file_system().clone(),
             runtime.remote_file_system().clone(),
+            runtime.local_file_system().clone(),
         ).await?;
 
         self.runtime = Some(runtime);
@@ -82,7 +82,8 @@ impl OperatorFunction2 for CountStarFunction {
                         .map_err(|e| internal_datafusion_err!("State value for 'count' is not a valid u64: {:?}", e))?;
                     u64::from_be_bytes(bytes)
                 }
-            }
+            };
+            println!("Loaded count from state: {}", self.local_count);
         }
 
         // TODO handle partition changes

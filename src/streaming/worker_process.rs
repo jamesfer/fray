@@ -1,9 +1,10 @@
 use crate::flight::FlightHandler;
 use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, TaskSchedulingDetailsUpdate};
 use crate::streaming::runtime::Runtime;
-use crate::streaming::state::state::{FileSystemStorage, PrefixedLocalFileSystemStorage, TempdirFileSystemStorage};
+use crate::streaming::state::state::{FileSystemStorage, TempdirFileSystemStorage};
 use crate::streaming::task_definition_2::TaskDefinition2;
 use crate::streaming::task_main_3::RunningTask;
+use crate::streaming::utils::test_utils::make_temp_dir;
 use datafusion::common::internal_datafusion_err;
 use datafusion::error::DataFusionError;
 use local_ip_address::local_ip;
@@ -11,9 +12,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
-use crate::streaming::utils::test_utils::make_temp_dir;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct InitialSchedulingDetails {
@@ -29,13 +28,22 @@ pub struct WorkerProcess {
 
 impl WorkerProcess {
     pub async fn start(name: String) -> Result<Self, DataFusionError> {
+        let remote_file_system = Arc::new(TempdirFileSystemStorage::from_tempdir(make_temp_dir(format!("{}-remote", name))?));
+        Self::start_with_remote_file_system(
+            name,
+            remote_file_system,
+        ).await
+    }
+
+    pub async fn start_with_remote_file_system(name: String, remote_file_system: Arc<dyn FileSystemStorage + Send + Sync>) -> Result<Self, DataFusionError> {
         let name = format!("[{}]", name);
         let local_ip_addr = local_ip()
             .map_err(|err| internal_datafusion_err!("Failed to get worker local ip: {}", err))?;
 
         // File system stores are fixed for now
-        let local_file_system = Arc::new(TempdirFileSystemStorage::from_tempdir(make_temp_dir(format!("{}-local", name))?));
-        let remote_file_system = Arc::new(TempdirFileSystemStorage::from_tempdir(make_temp_dir(format!("{}-remote", name))?));
+        let dir = make_temp_dir(format!("{}-local", name))?;
+        println!("Worker starting with local state: {}", dir.path().display());
+        let local_file_system = Arc::new(TempdirFileSystemStorage::from_tempdir(dir));
 
         let runtime = Arc::new(Runtime::start(
             local_ip_addr,
@@ -126,16 +134,18 @@ mod tests {
     use crate::streaming::operators::source::SourceOperator;
     use crate::streaming::operators::task_function::SItem;
     use crate::streaming::partitioning::{PartitionRange, PartitioningSpec};
+    use crate::streaming::state::state::TempdirFileSystemStorage;
     use crate::streaming::task_definition_2::TaskDefinition2;
     use crate::streaming::utils::create_remote_stream::create_remote_stream_no_runtime;
     use crate::streaming::utils::retry::retry_future;
+    use crate::streaming::utils::test_utils::make_temp_dir;
     use crate::streaming::worker_process::{InitialSchedulingDetails, WorkerProcess};
     use datafusion::common::{record_batch, DataFusionError};
     use datafusion::physical_expr::expressions::col;
-    use futures::stream::FuturesOrdered;
     use futures::{Stream, StreamExt};
     use std::pin::Pin;
-    use tokio::{join, select, try_join};
+    use std::sync::Arc;
+    use tokio::{join, try_join};
 
     #[tokio::test]
     pub async fn single_output_task() {
@@ -718,8 +728,7 @@ mod tests {
                             ])),
                             inputs: vec![],
                             outputs: vec![OperatorOutput {
-                                stream_id: "source_output".to_string(),
-                                ordinal: 0,
+                                stream_id: "source_output".to_string(), ordinal: 0,
                             }],
                         },
                         OperatorDefinition {
@@ -859,6 +868,196 @@ mod tests {
                 create_remote_stream_no_runtime(
                     "exchange_output1_2",
                     address,
+                    PartitionRange::empty(),
+                )
+            }).await.unwrap();
+            let results = Box::into_pin(results_stream).collect::<Vec<_>>().await;
+
+            assert_eq!(results.len(), 3);
+            assert_eq!(results[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
+            assert_eq!(results[1].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 3 }));
+            assert_eq!(results[2].as_ref().unwrap(), &SItem::RecordBatch(record_batch!(
+                ("count", UInt64, vec![6])
+            ).unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    pub async fn restarting_with_remote_state() {
+        let remote_file_system = Arc::new(TempdirFileSystemStorage::from_tempdir(make_temp_dir("shared-remote").unwrap()));
+        let worker1 = WorkerProcess::start_with_remote_file_system(format!("worker1-{}", uuid::Uuid::new_v4()), remote_file_system.clone()).await.unwrap();
+        let worker2 = WorkerProcess::start_with_remote_file_system(format!("worker2-{}", uuid::Uuid::new_v4()), remote_file_system).await.unwrap();
+        let address1 = worker1.data_exchange_address();
+        let address2 = worker2.data_exchange_address();
+
+        let first_test_batch = record_batch!(
+            ("a", Int32, vec![1i32, 2, 3])
+        ).unwrap();
+        let second_test_batch = record_batch!(
+            ("a", Int32, vec![4i32, 5, 6])
+        ).unwrap();
+
+        let task_definition = TaskDefinition2 {
+            task_id: "task1".to_string(),
+            operator: OperatorDefinition {
+                id: "nested1".to_string(),
+                state_id: "1".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "source1".to_string(),
+                            state_id: "2".to_string(),
+                            spec: OperatorSpec::Source(SourceOperator::new_with_markers(vec![
+                                StreamItem::from(Marker { checkpoint_number: 1 }),
+                                StreamItem::from(first_test_batch.clone()),
+                                StreamItem::from(Marker { checkpoint_number: 2 }),
+                                StreamItem::from(second_test_batch.clone()),
+                                StreamItem::from(Marker { checkpoint_number: 3 }),
+                            ])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "source_output".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "count1".to_string(),
+                            state_id: "3".to_string(),
+                            spec: OperatorSpec::CountStar(CountStarOperator::new()),
+                            inputs: vec![OperatorInput {
+                                stream_id: "source_output".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "count_output".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange1".to_string(),
+                            state_id: "4".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new("exchange_output1".to_string())),
+                            inputs: vec![OperatorInput {
+                                stream_id: "count_output".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+
+        // Run the task for the first time
+        worker1.start_task(
+            task_definition,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    partitions: PartitionRange::empty(),
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![],
+            },
+        ).await.unwrap();
+
+        {
+            let results_stream = retry_future(5, || {
+                create_remote_stream_no_runtime(
+                    "exchange_output1",
+                    address1,
+                    PartitionRange::empty(),
+                )
+            }).await.unwrap();
+            let results = Box::into_pin(results_stream).collect::<Vec<_>>().await;
+
+            assert_eq!(results.len(), 4);
+            assert_eq!(results[0].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 1 }));
+            assert_eq!(results[1].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 2 }));
+            assert_eq!(results[2].as_ref().unwrap(), &SItem::Marker(Marker { checkpoint_number: 3 }));
+            assert_eq!(results[3].as_ref().unwrap(), &SItem::RecordBatch(record_batch!(
+                ("count", UInt64, vec![6])
+            ).unwrap()));
+        }
+
+
+        let task_definition2 = TaskDefinition2 {
+            task_id: "task1_2".to_string(),
+            operator: OperatorDefinition {
+                id: "nested1_2".to_string(),
+                state_id: "1".to_string(),
+                spec: OperatorSpec::Nested(NestedOperator::new(
+                    vec![],
+                    vec![
+                        OperatorDefinition {
+                            id: "source1_2".to_string(),
+                            state_id: "2".to_string(),
+                            spec: OperatorSpec::Source(SourceOperator::new_with_markers(vec![
+                                StreamItem::from(Marker { checkpoint_number: 1 }),
+                                StreamItem::from(first_test_batch.clone()),
+                                StreamItem::from(Marker { checkpoint_number: 2 }),
+                                StreamItem::from(second_test_batch.clone()),
+                                StreamItem::from(Marker { checkpoint_number: 3 }),
+                            ])),
+                            inputs: vec![],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "source_output_2".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "count1_2".to_string(),
+                            state_id: "3".to_string(),
+                            spec: OperatorSpec::CountStar(CountStarOperator::new()),
+                            inputs: vec![OperatorInput {
+                                stream_id: "source_output_2".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![OperatorOutput {
+                                stream_id: "count_output_2".to_string(),
+                                ordinal: 0,
+                            }],
+                        },
+                        OperatorDefinition {
+                            id: "exchange1_2".to_string(),
+                            state_id: "4".to_string(),
+                            spec: OperatorSpec::RemoteExchangeOutput(RemoteExchangeOperator::new("exchange_output1_2".to_string())),
+                            inputs: vec![OperatorInput {
+                                stream_id: "count_output_2".to_string(),
+                                ordinal: 0,
+                            }],
+                            outputs: vec![],
+                        },
+                    ],
+                    vec![],
+                )),
+                inputs: vec![],
+                outputs: vec![],
+            },
+        };
+        // Re-run the task from a checkpoint
+        worker2.start_task_from(
+            task_definition2,
+            InitialSchedulingDetails {
+                generations: vec![GenerationSpec {
+                    id: "gen1".to_string(),
+                    partitions: PartitionRange::empty(),
+                    start_conditions: vec![],
+                }],
+                input_locations: vec![],
+            },
+            2, // Restart from checkpoint 2
+        ).await.unwrap();
+
+        {
+            let results_stream = retry_future(5, || {
+                create_remote_stream_no_runtime(
+                    "exchange_output1_2",
+                    address2,
                     PartitionRange::empty(),
                 )
             }).await.unwrap();

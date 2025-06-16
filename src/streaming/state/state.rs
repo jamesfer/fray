@@ -304,21 +304,20 @@ impl RocksDBStateBackend {
     }
 
     pub async fn move_to_checkpoint(&mut self, checkpoint: usize) -> Result<(), DataFusionError> {
-        let checkpoint_root_dir = Self::base_checkpoint_directory_path(&self.root_dir);
-
         // Find the directory for the checkpoint with a fairly inefficient search
-        let checkpoint_files = self.local_file_system.list_files(&checkpoint_root_dir).await?;
-        let checkpoint_dir = checkpoint_files
-            .iter()
-            .find(|entry| entry.name.to_str().map_or(false, |s| s.starts_with(&format!("{}__", checkpoint))))
-            .ok_or(internal_datafusion_err!("RocksDB state backend: checkpoint {} not found. Available checkpoints: {:?}", checkpoint, checkpoint_files))?;
-        let checkpoint_path = checkpoint_root_dir.join(&checkpoint_dir.name);
+        let (checkpoint_path, is_local) = self.find_checkpoint(checkpoint).await?;
 
         // Copy the checkpoint into another working directory
+        if !is_local {
+            // If the checkpoint is remote, we need to download it first. This is also inefficient
+            // as we end up downloading the checkpoint before copying it to the working directory.
+            Self::copy_dir_between_systems(self.remote_file_system.as_ref(), self.local_file_system.as_ref(), &checkpoint_path).await?;
+        }
+        // If the checkpoint is local, we can just copy it directly
         let new_working_dir = Self::create_working_directory_path(&self.root_dir);
         self.local_file_system.copy(&checkpoint_path, &new_working_dir).await?;
-        let new_db = Self::open_rocksdb_database(self.local_file_system.as_ref(), &new_working_dir)?;
 
+        let new_db = Self::open_rocksdb_database(self.local_file_system.as_ref(), &new_working_dir)?;
         // Clean up the old working directory
         let old_working_dir = mem::replace(&mut self.working_dir, new_working_dir.into_os_string());
         let old_db = mem::replace(&mut self.open_db, new_db);
@@ -335,7 +334,7 @@ impl RocksDBStateBackend {
     ) {
         // Uploads checkpoints in the background to the remote file system
         while let Some(next_path) = checkpoints.recv().await {
-            Self::upload_checkpoint_directory(
+            Self::copy_dir_between_systems(
                 local_file_system.as_ref(),
                 remote_file_system.as_ref(),
                 &next_path,
@@ -345,27 +344,55 @@ impl RocksDBStateBackend {
         }
     }
 
-    async fn upload_checkpoint_directory(
-        local_file_system: &(dyn FileSystemStorage + Send + Sync),
-        remote_file_system: &(dyn FileSystemStorage + Send + Sync),
+    async fn copy_dir_between_systems(
+        source_system: &(dyn FileSystemStorage + Send + Sync),
+        destination_system: &(dyn FileSystemStorage + Send + Sync),
         path: impl AsRef<Path>,
     ) -> Result<(), DataFusionError> {
-        remote_file_system.mkdir_all(&path.as_ref()).await?;
+        destination_system.mkdir_all(&path.as_ref()).await?;
         let mut queue = vec![PathBuf::new().join(path.as_ref())];
         while let Some(next) = queue.pop() {
-            for entry in local_file_system.list_files(&next).await? {
+            for entry in source_system.list_files(&next).await? {
                 let entry_path = next.join(&entry.name);
                 if entry.directory {
-                    remote_file_system.mkdir_all(&entry_path).await?;
+                    destination_system.mkdir_all(&entry_path).await?;
                     queue.push(entry_path);
                 } else {
-                    let contents = local_file_system.read_file(&entry_path).await?;
-                    remote_file_system.write_file(&entry_path, &contents).await?;
+                    let contents = source_system.read_file(&entry_path).await?;
+                    destination_system.write_file(&entry_path, &contents).await?;
                 }
             }
         }
 
         Ok(())
+    }
+
+    async fn find_checkpoint(&self, checkpoint: usize) -> Result<(PathBuf, bool), DataFusionError> {
+        let checkpoint_root_dir = Self::base_checkpoint_directory_path(&self.root_dir);
+
+        // Find the checkpoint in the local file system first. This is fairly inefficient
+        let checkpoint_files = self.local_file_system.list_files(&checkpoint_root_dir).await?;
+        let checkpoint_dir = checkpoint_files
+            .iter()
+            .find(|entry| entry.name.to_str().map_or(false, |s| s.starts_with(&format!("{}__", checkpoint))));
+        if let Some(checkpoint_dir) = checkpoint_dir {
+            let checkpoint_path = checkpoint_root_dir.join(&checkpoint_dir.name);
+            println!("Moving to checkpoint at {}", self.local_file_system.get_physical_path(&checkpoint_path)?.display());
+            return Ok((checkpoint_path, true));
+        }
+
+        // If no local checkpoint was found, try to find it in the remote file system
+        let checkpoint_files = self.remote_file_system.list_files(&checkpoint_root_dir).await?;
+        let checkpoint_dir = checkpoint_files
+            .iter()
+            .find(|entry| entry.name.to_str().map_or(false, |s| s.starts_with(&format!("{}__", checkpoint))));
+        if let Some(checkpoint_dir) = checkpoint_dir {
+            let checkpoint_path = checkpoint_root_dir.join(&checkpoint_dir.name);
+            println!("Moving to remote checkpoint at {}", self.remote_file_system.get_physical_path(&checkpoint_path)?.display());
+            return Ok((checkpoint_path, false));
+        }
+
+        Err(internal_datafusion_err!("RocksDB state backend: checkpoint {} not found locally or in remote file system. Available checkpoints: {:?}", checkpoint, checkpoint_files))
     }
 
     fn create_rocksdb_checkpoint(&self, checkpoint_dir: &PathBuf) -> Result<(), DataFusionError> {
