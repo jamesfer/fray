@@ -108,9 +108,10 @@ class DFRayProcessorPool:
     #
     # This is simple though and will suffice for now
 
-    def __init__(self, min_workers: int, max_workers: int):
+    def __init__(self, min_workers: int, max_workers: int, use_streaming_processor=False):
         self.min_workers = min_workers
         self.max_workers = max_workers
+        self.use_streaming_processor = use_streaming_processor
 
         # a map of processor_key (a random identifier) to stage actor reference
         self.pool = {}
@@ -193,12 +194,18 @@ class DFRayProcessorPool:
         self.processors_ready.clear()
         processor_key = new_friendly_name()
         log.debug(f"starting processor: {processor_key}")
-        processor = DFRayProcessor.options(name=f"Processor : {processor_key}").remote(
+        processor = self._processor_class().options(name=f"Processor : {processor_key}").remote(
             processor_key
         )
         self.pool[processor_key] = processor
         self.processors_started.add(processor.start_up.remote())
         self.available.add(processor_key)
+
+    def _processor_class(self):
+        if self.use_streaming_processor:
+            return DFRayStreamProcessor
+        else:
+            return DFRayProcessor
 
     async def _wait_for_processors_started(self):
         log.info("waiting for processors to be ready")
@@ -292,6 +299,47 @@ class DFRayProcessor:
         log.info(f"[{self.processor_key}] done serving")
 
 
+@ray.remote(num_cpus=0.01, scheduling_strategy="SPREAD")
+class DFRayStreamProcessor:
+    def __init__(self, processor_key):
+        self.processor_key = processor_key
+
+        # import this here so ray doesn't try to serialize the rust extension
+        from datafusion_ray._datafusion_ray_internal import (
+            DFRayStreamingProcessorService,
+        )
+
+        self.processor_service = DFRayStreamingProcessorService(processor_key)
+
+    async def start_up(self):
+        # this method is sync
+        self.processor_service.start_up()
+        return self.processor_key
+
+    async def all_done(self):
+        await self.processor_service.all_done()
+
+    async def addr(self):
+        return (self.processor_key, self.processor_service.addr())
+
+    async def update_plan(
+        self,
+        stage_id: int,
+        output_stream_address_map: dict[str, str],
+        plan_bytes: bytes,
+    ):
+        await self.processor_service.update_plan(
+            stage_id,
+            output_stream_address_map,
+            plan_bytes,
+        )
+
+    async def serve(self):
+        log.info(f"[{self.processor_key}] serving on {self.processor_service.addr()}")
+        await self.processor_service.serve()
+        log.info(f"[{self.processor_key}] done serving")
+
+
 @dataclass
 class StageData:
     stage_id: int
@@ -300,6 +348,12 @@ class StageData:
     child_stage_ids: list[int]
     num_output_partitions: int
     full_partitions: bool
+
+@dataclass
+class StreamingStageData:
+    stage_id: int
+    output_stream_id: str
+    plan_bytes: bytes
 
 
 @dataclass
@@ -316,6 +370,18 @@ class InternalStageData:
     def __str__(self):
         return f"""Stage: {self.stage_id}, pg: {self.partition_group}, child_stages:{self.child_stage_ids}, listening addr:{self.remote_addr}"""
 
+@dataclass
+class InternalStreamingStageData:
+    stage_id: int
+    output_stream_id: str
+    plan_bytes: bytes
+    remote_processor: ...  # ray.actor.ActorHandle[DFRayProcessor]
+    remote_addr: str
+
+    def __str__(self):
+        return f"""Stage: {self.stage_id}, listening addr:{self.remote_addr}"""
+
+
 
 @ray.remote(num_cpus=0.01, scheduling_strategy="SPREAD")
 class DFRayContextSupervisor:
@@ -327,6 +393,7 @@ class DFRayContextSupervisor:
         log.info(f"Creating DFRayContextSupervisor worker_pool_min: {worker_pool_min}")
         self.pool = DFRayProcessorPool(worker_pool_min, worker_pool_max)
         self.stages: dict[str, InternalStageData] = {}
+        self.streaming_stages: dict[str, InternalStageData] = {}
         log.info("Created DFRayContextSupervisor")
 
     async def start(self):
@@ -446,18 +513,92 @@ class DFRayContextSupervisor:
         await self.pool.all_done()
 
 
+@ray.remote(num_cpus=0.01, scheduling_strategy="SPREAD")
+class DFRayContextStreamingSupervisor:
+    def __init__(
+        self,
+        worker_pool_min: int,
+        worker_pool_max: int,
+    ) -> None:
+        log.info(f"Creating DFRayContextStreamingSupervisor worker_pool_min: {worker_pool_min}")
+        # TODO
+        self.pool = DFRayProcessorPool(worker_pool_min, worker_pool_max, True)
+        self.streaming_stages: dict[str, InternalStreamingStageData] = {}
+        log.info("Created DFRayContextStreamingSupervisor")
+
+    async def start(self):
+        await self.pool.start()
+
+    async def wait_for_ready(self):
+        await self.pool.wait_for_ready()
+
+    async def get_stage_addrs(self, stage_id: int):
+        return [
+            (sd.remote_addr, sd.output_stream_id)
+            for sd in self.streaming_stages.values()
+            if sd.stage_id == stage_id
+        ]
+
+    async def run_streaming_query(self, stage_datas: list[StreamingStageData]):
+        # Release already running stages
+        if len(self.streaming_stages) > 0:
+            self.pool.release(list(self.streaming_stages.keys()))
+
+        remote_processors, remote_processor_keys, remote_addrs = (
+            await self.pool.acquire(len(stage_datas))
+        )
+
+        self.streaming_stages = {}
+        for i, sd in enumerate(stage_datas):
+            remote_processor = remote_processors[i]
+            remote_processor_key = remote_processor_keys[i]
+            remote_addr = remote_addrs[i]
+            self.streaming_stages[remote_processor_key] = InternalStreamingStageData(
+                sd.stage_id,
+                sd.output_stream_id,
+                sd.plan_bytes,
+                remote_processor,
+                remote_addr,
+            )
+
+        output_stream_address_map: dict[str, str] = {}
+        for stage_key, isd in self.streaming_stages.items():
+            output_stream_address_map[isd.output_stream_id] = isd.remote_addr
+
+        refs = []
+        # now tell the stages what they are doing for this query
+        for stage_key, isd in self.streaming_stages.items():
+            log.info(f"going to update plan for {stage_key}")
+            refs.append(
+                isd.remote_processor.update_plan.remote(
+                    isd.stage_id,
+                    output_stream_address_map,
+                    isd.plan_bytes,
+                )
+            )
+        log.info("that's all of them")
+
+        await wait_for(refs, "updating plans")
+
+    async def all_done(self):
+        await self.pool.all_done()
+
+
 class DFRayDataFrame:
     def __init__(
         self,
         internal_df: DFRayDataFrameInternal,
         supervisor,  # ray.actor.ActorHandle[DFRayContextSupervisor],
+        streaming_supervisor,  # ray.actor.ActorHandle[DFRayContextStreamingSupervisor],
         batch_size=8192,
         partitions_per_worker: int | None = None,
         prefetch_buffer_size=0,
     ):
         self.df = internal_df
         self.supervisor = supervisor
+        self.streaming_supervisor = streaming_supervisor
         self._stages = None
+        self._streaming_stages = None
         self._batches = None
         self.batch_size = batch_size
         self.partitions_per_worker = partitions_per_worker
@@ -474,6 +615,13 @@ class DFRayDataFrame:
 
         return self._stages
 
+    def streaming_stages(self):
+        # create our coordinator now, which we need to create stages
+        if not self._streaming_stages:
+            self._streaming_stages = self.df.streaming_stages()
+
+        return self._streaming_stages
+
     def schema(self):
         return self.df.schema()
 
@@ -485,6 +633,31 @@ class DFRayDataFrame:
 
     def optimized_logical_plan(self):
         return self.df.optimized_logical_plan()
+
+    def collect_streaming(self) -> list[pa.RecordBatch]:
+        if not self._batches:
+            t1 = time.time()
+            print("Making streaming stages")
+            self.streaming_stages()
+            t2 = time.time()
+            log.debug(f"creating streaming stages took {t2 - t1}s")
+
+            last_stage_id = min([stage.stage_id for stage in self._streaming_stages])
+            log.debug(f"last stage is {last_stage_id}")
+            print("Last stage id", last_stage_id)
+
+            print("Dispatching streaming stages")
+            self.create_ray_streaming_stages()
+
+            last_stage_addrs = ray.get(
+                self.streaming_supervisor.get_stage_addrs.remote(last_stage_id)
+            )
+            log.debug(f"last stage addrs {last_stage_addrs}")
+
+            reader = self.df.read_final_streaming_stage(last_stage_id, last_stage_addrs[0][0], last_stage_addrs[0][1])
+            log.debug("got reader")
+            self._batches = list(reader)
+        return self._batches
 
     def collect(self) -> list[pa.RecordBatch]:
         if not self._batches:
@@ -512,6 +685,10 @@ class DFRayDataFrame:
         batches = self.collect()
         print(prettify(batches))
 
+    def streaming_show(self) -> None:
+        batches = self.collect_streaming()
+        print(prettify(batches))
+
     def create_ray_stages(self):
         stage_datas = []
 
@@ -533,6 +710,22 @@ class DFRayDataFrame:
                 )
 
         ref = self.supervisor.new_query.remote(stage_datas)
+        call_sync(wait_for([ref], "creating ray stages"))
+
+    def create_ray_streaming_stages(self):
+        stage_datas = []
+
+        for stage in self.streaming_stages():
+            stage_datas.append(
+                StreamingStageData(
+                    stage.stage_id,
+                    stage.output_stream_id,
+                    stage.plan_bytes(),
+                )
+            )
+
+        print("Created N streaming stages", len(stage_datas))
+        ref = self.streaming_supervisor.run_streaming_query.remote(stage_datas)
         call_sync(wait_for([ref], "creating ray stages"))
 
 
@@ -564,6 +757,26 @@ class DFRayContext:
         # ensure we are ready
         s = time.time()
         call_sync(wait_for([start_ref], "RayContextSupervisor start"))
+        e = time.time()
+        log.info(
+            f"RayContext::__init__ waiting for supervisor to be ready took {e - s}s"
+        )
+
+
+        self.streaming_supervisor = DFRayContextStreamingSupervisor.options(
+            name="RayContextStreamingSupervisor",
+        ).remote(
+            worker_pool_min,
+            worker_pool_max,
+        )
+
+        # start up our streaming supervisor and don't check in on it until its
+        # time to query, then we will await this ref
+        start_ref = self.streaming_supervisor.start.remote()
+
+        # ensure we are ready
+        s = time.time()
+        call_sync(wait_for([start_ref], "RayContextStreamingSupervisor start"))
         e = time.time()
         log.info(
             f"RayContext::__init__ waiting for supervisor to be ready took {e - s}s"
@@ -628,6 +841,7 @@ class DFRayContext:
         return DFRayDataFrame(
             df,
             self.supervisor,
+            self.streaming_supervisor,
             self.batch_size,
             self.partitions_per_worker,
             self.prefetch_buffer_size,
@@ -640,3 +854,5 @@ class DFRayContext:
         log.info("DFRayContext, cleaning up remote resources")
         ref = self.supervisor.all_done.remote()
         call_sync(wait_for([ref], "DFRayContextSupervisor all done"))
+        ref = self.streaming_supervisor.all_done.remote()
+        call_sync(wait_for([ref], "DFRayContextStreamingSupervisor all done"))
