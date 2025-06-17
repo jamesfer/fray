@@ -1,6 +1,6 @@
 import ray
 
-from datafusion_ray._datafusion_ray_internal import get_tasks, schedule_without_partitions, collect
+from datafusion_ray._datafusion_ray_internal import get_tasks, entrypoint, schedule_without_partitions, collect
 from datafusion_ray.core import df_ray_runtime_env
 from datafusion_ray.friendly import new_friendly_name
 
@@ -36,10 +36,18 @@ class Processor:
         )
 
 
-def main():
-    tasks = get_tasks()
-    print(f"Found {len(tasks)} tasks")
 
+def main():
+    entrypoint(Processor, ray.get)
+    # tasks = get_tasks()
+    # print(f"Found {len(tasks)} tasks")
+    #
+    # record_batches = run_tasks(tasks)
+    #
+    # print([record_batch.to_pyarrow() for record_batch in record_batches])
+
+
+def run_tasks(tasks):
     # Start up all processors
     processors = [Processor.remote() for _ in range(len(tasks))]
     addrs = ray.get([processor.start_up.remote() for processor in processors])
@@ -57,8 +65,8 @@ def main():
     # Collect results from the last task
     output_task, output_addr = assigned_tasks[-1]
     record_batches = collect(output_addr, output_task.output_streams()[0])
+    return record_batches
 
-    print([record_batch.to_pyarrow() for record_batch in record_batches])
 
 try:
     main()

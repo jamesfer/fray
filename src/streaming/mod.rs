@@ -11,3 +11,4 @@ pub mod task_definition_2;
 mod runtime;
 pub mod partitioning;
 pub mod state;
+pub mod coordinator;

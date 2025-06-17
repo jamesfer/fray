@@ -1,3 +1,4 @@
+use arrow_array::RecordBatch;
 use crate::dataframe::PyRecordBatch;
 use crate::python::py_scheduling_details::DFRayInitialSchedulingDetails;
 use crate::python::py_task_definition::DFRayTaskDefinition;
@@ -10,70 +11,81 @@ use crate::streaming::worker_process::InitialSchedulingDetails;
 use datafusion_python::utils::wait_for_future;
 use futures::StreamExt;
 use futures::TryStreamExt;
-use pyo3::{pyfunction, PyResult, Python};
+use pyo3::{pyfunction, PyErr, PyResult, Python};
+use datafusion::error::DataFusionError;
+use crate::streaming::task_definition_2::TaskDefinition2;
 
 #[pyfunction]
 pub fn collect(py: Python, address: String, stream_id: String) -> PyResult<Vec<PyRecordBatch>> {
-    wait_for_future(py, async move {
-        let stream = retry_future(5, || {
-            create_remote_stream_no_runtime(
-                &stream_id,
-                &address,
-                PartitionRange::empty(),
-            )
-        }).await
-            .map_err(|e| {;
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to create remote stream: {}",
-                    e
-                ))
-            })?;
-        let stream = Box::into_pin(stream);
-        let stream = stream.map(|result| {
-            // Use a match statement to print each value of result
-            match result {
-                Ok(SItem::RecordBatch(record_batch)) => {
-                    println!("Collect (py utils) Received record batch: {:?}", record_batch);
-                    Ok(SItem::RecordBatch(record_batch))
-                },
-                Ok(SItem::Marker(marker)) => {
-                    println!("Collect (py utils) Received marker: {}", marker.checkpoint_number);
-                    Ok(SItem::Marker(marker))
-                },
-                Ok(SItem::Generation(usize)) => {
-                    println!("Collect (py utils) Received generation item");
-                    Ok(SItem::Generation(usize))
-                },
-                Err(err) => {
-                    println!("Collect (py utils) Error in stream: {}", err);
-                    Err(err)
-                },
-            }
-        });
+    Ok(
+        wait_for_future(py, async move {
+            collect_inner(&address, &stream_id).await
+        })
+            .map_err(|err| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("Failed to collect record batches: {}", err)
+                )
+            })?
+            .into_iter()
+            .map(PyRecordBatch::from)
+            .collect()
+    )
+}
 
-        let results = stream.try_collect::<Vec<_>>().await
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Failed to collect from remote stream: {}",
-                    e
-                ))
-            })?;
-        Ok(results.into_iter()
-            .filter_map(|item| {
-                match item {
-                    SItem::RecordBatch(record_batch) => Some(record_batch),
-                    _ => None,
-                }
-            })
-            .map(|record_batch| {
-                PyRecordBatch::from(record_batch)
-            })
-            .collect::<Vec<PyRecordBatch>>())
-    })
+pub async fn collect_inner(address: &str, stream_id: &str) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let stream = retry_future(5, || {
+        create_remote_stream_no_runtime(
+            &stream_id,
+            &address,
+            PartitionRange::empty(),
+        )
+    }).await?;
+    let stream = Box::into_pin(stream);
+    let stream = stream.map(|result| {
+        // Use a match statement to print each value of result
+        match result {
+            Ok(SItem::RecordBatch(record_batch)) => {
+                println!("Collect (py utils) Received record batch: {:?}", record_batch);
+                Ok(SItem::RecordBatch(record_batch))
+            },
+            Ok(SItem::Marker(marker)) => {
+                println!("Collect (py utils) Received marker: {}", marker.checkpoint_number);
+                Ok(SItem::Marker(marker))
+            },
+            Ok(SItem::Generation(usize)) => {
+                println!("Collect (py utils) Received generation item");
+                Ok(SItem::Generation(usize))
+            },
+            Err(err) => {
+                println!("Collect (py utils) Error in stream: {}", err);
+                Err(err)
+            },
+        }
+    });
+
+    let results = stream
+        .filter_map(|item| async move {
+            match item {
+                Err(e) => Some(Err(e)),
+                Ok(SItem::RecordBatch(record_batch)) => Some(Ok(record_batch)),
+                _ => None,
+            }
+        })
+        .try_collect::<Vec<_>>().await?;
+    Ok(results)
 }
 
 #[pyfunction]
 pub fn schedule_without_partitions(py: Python, assigned_tasks: Vec<(DFRayTaskDefinition, String)>) -> DFRayInitialSchedulingDetails {
+    let inner_tasks = assigned_tasks.into_iter()
+        .map(|(task, address)| (task.task_definition2, address))
+        .collect::<Vec<_>>();
+    DFRayInitialSchedulingDetails {
+        initial_scheduling_details: schedule_without_partitions_inner(&inner_tasks),
+    }
+}
+
+pub fn schedule_without_partitions_inner(assigned_tasks: &[(impl AsRef<TaskDefinition2>, String)]) -> InitialSchedulingDetails {
     let initial_generation = GenerationSpec {
         id: "initial_generation".to_string(),
         partitions: PartitionRange::empty(),
@@ -81,7 +93,7 @@ pub fn schedule_without_partitions(py: Python, assigned_tasks: Vec<(DFRayTaskDef
     };
     let input_details = assigned_tasks.iter()
         .flat_map(|(task, address)| {
-            task.task_definition2.exchange_outputs()
+            task.exchange_outputs()
                 .into_iter()
                 .map(|stream_id| {
                     GenerationInputDetail {
@@ -95,11 +107,8 @@ pub fn schedule_without_partitions(py: Python, assigned_tasks: Vec<(DFRayTaskDef
                 })
         })
         .collect::<Vec<_>>();
-    let initial_scheduling_details = DFRayInitialSchedulingDetails {
-        initial_scheduling_details: InitialSchedulingDetails {
-            input_locations: input_details,
-            generations: vec![initial_generation],
-        },
-    };
-    initial_scheduling_details
+    InitialSchedulingDetails {
+        input_locations: input_details,
+        generations: vec![initial_generation],
+    }
 }

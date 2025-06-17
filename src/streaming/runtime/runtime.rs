@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use crate::streaming::runtime::data_client_manager::DataClientManager;
 use crate::streaming::runtime::DataExchangeManager;
-use crate::streaming::state::state::FileSystemStorage;
+use crate::streaming::state::file_system::FileSystemStorage;
 
 pub struct Runtime {
     data_client_manager: DataClientManager,

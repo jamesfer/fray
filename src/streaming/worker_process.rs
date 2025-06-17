@@ -1,7 +1,7 @@
+use std::borrow::Cow;
 use crate::flight::FlightHandler;
 use crate::streaming::generation::{GenerationInputDetail, GenerationSpec, TaskSchedulingDetailsUpdate};
 use crate::streaming::runtime::Runtime;
-use crate::streaming::state::state::{FileSystemStorage, TempdirFileSystemStorage};
 use crate::streaming::task_definition_2::TaskDefinition2;
 use crate::streaming::task_main_3::RunningTask;
 use crate::streaming::utils::test_utils::make_temp_dir;
@@ -13,11 +13,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::streaming::state::file_system::{FileSystemStorage, TempdirFileSystemStorage};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct InitialSchedulingDetails {
     pub generations: Vec<GenerationSpec>,
     pub input_locations: Vec<GenerationInputDetail>,
+}
+
+impl InitialSchedulingDetails {
+    pub fn to_bytes(&self) -> Result<Cow<[u8]>, DataFusionError> {
+        match flexbuffers::to_vec(&self) {
+            Ok(bytes) => Ok(Cow::Owned(bytes)),
+            Err(e) => Err(internal_datafusion_err!(
+                "Failed to serialize InitialSchedulingDetails to Flexbuffer: {}",
+                e
+            )),
+        }
+    }
 }
 
 pub struct WorkerProcess {
@@ -134,7 +147,7 @@ mod tests {
     use crate::streaming::operators::source::SourceOperator;
     use crate::streaming::operators::task_function::SItem;
     use crate::streaming::partitioning::{PartitionRange, PartitioningSpec};
-    use crate::streaming::state::state::TempdirFileSystemStorage;
+    use crate::streaming::state::file_system::TempdirFileSystemStorage;
     use crate::streaming::task_definition_2::TaskDefinition2;
     use crate::streaming::utils::create_remote_stream::create_remote_stream_no_runtime;
     use crate::streaming::utils::retry::retry_future;

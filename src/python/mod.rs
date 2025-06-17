@@ -1,8 +1,9 @@
 pub mod streaming_processor_service;
 mod py_task_definition;
 mod py_scheduling_details;
-mod py_utils;
+pub mod py_utils;
 mod py_entrypoint;
+pub mod remote_processor;
 
 use std::env;
 use pyo3::{pymodule, wrap_pyfunction, Bound, PyResult};
@@ -23,6 +24,7 @@ fn _datafusion_ray_internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_entrypoint::get_tasks, m)?)?;
     m.add_function(wrap_pyfunction!(py_utils::schedule_without_partitions, m)?)?;
     m.add_function(wrap_pyfunction!(py_utils::collect, m)?)?;
+    m.add_function(wrap_pyfunction!(py_entrypoint::entrypoint, m)?)?;
     Ok(())
 }
 

@@ -4,7 +4,7 @@ use local_ip_address::local_ip;
 use datafusion::common::internal_datafusion_err;
 use datafusion::error::DataFusionError;
 use crate::streaming::runtime::Runtime;
-use crate::streaming::state::state::TempdirFileSystemStorage;
+use crate::streaming::state::file_system::TempdirFileSystemStorage;
 
 pub fn make_temp_dir(prefix: impl AsRef<OsStr>) -> Result<tempfile::TempDir, DataFusionError> {
     tempfile::Builder::new()
