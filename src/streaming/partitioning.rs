@@ -35,6 +35,10 @@ impl PartitionRange {
         }
     }
 
+    pub fn full() -> Self {
+        Self::new(0, 2^32, 2^32)
+    }
+
     pub fn new_from_index(index: usize, partitions: usize) -> Self {
         Self {
             start: index,

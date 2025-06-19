@@ -66,6 +66,7 @@ impl RunningTask {
                 let result = operator_main_loop(
                     task_id.clone(),
                     function,
+                    &operator.state_id,
                     runtime,
                     initial_checkpoint,
                     state,
@@ -121,6 +122,7 @@ impl RunningTask {
 async fn operator_main_loop(
     task_id: String,
     mut function: Box<dyn OperatorFunction2 + Sync + Send>,
+    state_id: &str,
     runtime: Arc<Runtime>,
     initial_checkpoint: usize,
     state: Arc<Mutex<RunningTaskState>>,
@@ -128,7 +130,7 @@ async fn operator_main_loop(
 ) -> Result<(), DataFusionError> {
     // Initialisation
     println!("Starting task {}", task_id);
-    function.init(runtime, scheduling_details_receiver).await?;
+    function.init(runtime, scheduling_details_receiver, state_id).await?;
     // function.update_scheduling_details(Some(generations.clone()), Some(initial_input_locations.clone())).await?;
 
     // Main loop

@@ -54,7 +54,8 @@ impl OperatorFunction2 for RemoteSourceOperatorFunction {
     async fn init(
         &mut self,
         runtime: Arc<Runtime>,
-        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
+        _state_id: &str,
     ) -> Result<(), DataFusionError> {
         self.runtime = Some(runtime);
         self.scheduling_details_state = Some(scheduling_details);

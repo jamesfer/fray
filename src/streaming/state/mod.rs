@@ -1,2 +1,3 @@
 pub mod state;
-mod file_system;
+pub mod checkpoint_storage;
+pub mod file_system;

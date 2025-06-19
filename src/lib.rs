@@ -40,6 +40,7 @@ pub mod stage_reader;
 pub mod streaming;
 pub mod util;
 mod python;
+mod run;
 // #[pymodule]
 // fn _datafusion_ray_internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
 //     setup_logging();

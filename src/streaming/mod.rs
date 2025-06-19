@@ -1,4 +1,4 @@
-mod action_stream;
+pub mod action_stream;
 mod checkpoint_storage_manager;
 pub(crate) mod operators;
 pub mod translation;

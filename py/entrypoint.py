@@ -1,21 +1,36 @@
 import ray
+import signal
+import sys
 
 from datafusion_ray._datafusion_ray_internal import get_tasks, entrypoint, schedule_without_partitions, collect
 from datafusion_ray.core import df_ray_runtime_env
 from datafusion_ray.friendly import new_friendly_name
 
+# Initialize Ray with shutdown handler
 ray.init(runtime_env=df_ray_runtime_env)
+
+def signal_handler(signum, frame):
+    print("\nReceived interrupt signal, shutting down Ray cluster...")
+    try:
+        ray.shutdown()
+    except Exception as e:
+        print(f"Error during Ray shutdown: {e}")
+    sys.exit(0)
+
+# Register signal handlers for graceful shutdown
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 @ray.remote
 class Processor:
-    def __init__(self):
+    def __init__(self, remote_storage_dir=None):
         # Import the rust extension module
         from datafusion_ray._datafusion_ray_internal import (
             DFRayStreamingProcessorService,
         )
 
         name = new_friendly_name()
-        self.processor_service = DFRayStreamingProcessorService(name)
+        self.processor_service = DFRayStreamingProcessorService(name, remote_storage_dir)
 
     async def start_up(self):
         # Waits for the worker to be ready
@@ -35,16 +50,23 @@ class Processor:
             initial_schedule_details_bytes,
         )
 
+    async def update_plan_with_checkpoint(
+        self,
+        plan_bytes: bytes,
+        initial_schedule_details_bytes: bytes,
+        starting_checkpoint
+    ):
+        self.processor_service.start_task_from(
+            plan_bytes,
+            initial_schedule_details_bytes,
+            starting_checkpoint,
+        )
+
 
 
 def main():
     entrypoint(Processor, ray.get)
-    # tasks = get_tasks()
-    # print(f"Found {len(tasks)} tasks")
-    #
-    # record_batches = run_tasks(tasks)
-    #
-    # print([record_batch.to_pyarrow() for record_batch in record_batches])
+    print("Python main finished")
 
 
 def run_tasks(tasks):
@@ -72,3 +94,6 @@ try:
     main()
 except Exception as e:
     print(e)
+finally:
+    print("Shutting down Ray cluster...")
+    ray.shutdown()

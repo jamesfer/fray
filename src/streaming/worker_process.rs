@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::streaming::state::checkpoint_storage::FileSystemStateStorage;
 use crate::streaming::state::file_system::{FileSystemStorage, TempdirFileSystemStorage};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -22,9 +23,9 @@ pub struct InitialSchedulingDetails {
 }
 
 impl InitialSchedulingDetails {
-    pub fn to_bytes(&self) -> Result<Cow<[u8]>, DataFusionError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DataFusionError> {
         match flexbuffers::to_vec(&self) {
-            Ok(bytes) => Ok(Cow::Owned(bytes)),
+            Ok(bytes) => Ok(bytes),
             Err(e) => Err(internal_datafusion_err!(
                 "Failed to serialize InitialSchedulingDetails to Flexbuffer: {}",
                 e
@@ -42,13 +43,17 @@ pub struct WorkerProcess {
 impl WorkerProcess {
     pub async fn start(name: String) -> Result<Self, DataFusionError> {
         let remote_file_system = Arc::new(TempdirFileSystemStorage::from_tempdir(make_temp_dir(format!("{}-remote", name))?));
+        let remote_state_store = Arc::new(FileSystemStateStorage::new(
+            remote_file_system.clone(),
+            "state",
+        ));
         Self::start_with_remote_file_system(
             name,
-            remote_file_system,
+            remote_state_store,
         ).await
     }
 
-    pub async fn start_with_remote_file_system(name: String, remote_file_system: Arc<dyn FileSystemStorage + Send + Sync>) -> Result<Self, DataFusionError> {
+    pub async fn start_with_remote_file_system(name: String, remote_state_store: Arc<FileSystemStateStorage>) -> Result<Self, DataFusionError> {
         let name = format!("[{}]", name);
         let local_ip_addr = local_ip()
             .map_err(|err| internal_datafusion_err!("Failed to get worker local ip: {}", err))?;
@@ -61,7 +66,7 @@ impl WorkerProcess {
         let runtime = Arc::new(Runtime::start(
             local_ip_addr,
             local_file_system,
-            remote_file_system,
+            remote_state_store,
         ).await?);
 
         Ok(Self {
@@ -159,6 +164,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use tokio::{join, try_join};
+    use crate::streaming::state::checkpoint_storage::FileSystemStateStorage;
 
     #[tokio::test]
     pub async fn single_output_task() {
@@ -898,8 +904,12 @@ mod tests {
     #[tokio::test]
     pub async fn restarting_with_remote_state() {
         let remote_file_system = Arc::new(TempdirFileSystemStorage::from_tempdir(make_temp_dir("shared-remote").unwrap()));
-        let worker1 = WorkerProcess::start_with_remote_file_system(format!("worker1-{}", uuid::Uuid::new_v4()), remote_file_system.clone()).await.unwrap();
-        let worker2 = WorkerProcess::start_with_remote_file_system(format!("worker2-{}", uuid::Uuid::new_v4()), remote_file_system).await.unwrap();
+        let remote_state_store = Arc::new(FileSystemStateStorage::new(
+            remote_file_system.clone(),
+            "state".to_string(),
+        ));
+        let worker1 = WorkerProcess::start_with_remote_file_system(format!("worker1-{}", uuid::Uuid::new_v4()), remote_state_store.clone()).await.unwrap();
+        let worker2 = WorkerProcess::start_with_remote_file_system(format!("worker2-{}", uuid::Uuid::new_v4()), remote_state_store).await.unwrap();
         let address1 = worker1.data_exchange_address();
         let address2 = worker2.data_exchange_address();
 
@@ -971,7 +981,7 @@ mod tests {
             InitialSchedulingDetails {
                 generations: vec![GenerationSpec {
                     id: "gen1".to_string(),
-                    partitions: PartitionRange::empty(),
+                    partitions: PartitionRange::unit(),
                     start_conditions: vec![],
                 }],
                 input_locations: vec![],
@@ -1058,7 +1068,7 @@ mod tests {
             InitialSchedulingDetails {
                 generations: vec![GenerationSpec {
                     id: "gen1".to_string(),
-                    partitions: PartitionRange::empty(),
+                    partitions: PartitionRange::unit(),
                     start_conditions: vec![],
                 }],
                 input_locations: vec![],

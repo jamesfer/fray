@@ -321,6 +321,7 @@ impl OperatorFunction2 for RemoteExchangeOperatorFunction {
         &mut self,
         runtime: Arc<Runtime>,
         scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
+        _state_id: &str,
     ) -> Result<(), DataFusionError> {
         let scheduling_details_subscriber = scheduling_details.subscribe().await;
         let details = scheduling_details_subscriber.get().await;

@@ -76,7 +76,8 @@ impl OperatorFunction2 for IdentityOperatorFunction {
     async fn init(
         &mut self,
         _runtime: Arc<Runtime>,
-        _scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+        _scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
+        _state_id: &str,
     ) -> Result<(), DataFusionError> {
         Ok(())
     }

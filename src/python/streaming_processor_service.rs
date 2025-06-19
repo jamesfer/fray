@@ -32,6 +32,8 @@ use crate::util::ResultExt;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use crate::streaming::state::checkpoint_storage::FileSystemStateStorage;
+use crate::streaming::state::file_system::PrefixedLocalFileSystemStorage;
 
 enum WorkerProcessState {
     // The future needs to be sync and send because it is used by pyclass structs, which need to be
@@ -96,12 +98,20 @@ pub struct DFRayStreamingProcessorService {
 #[pymethods]
 impl DFRayStreamingProcessorService {
     #[new]
-    pub fn new(name: String) -> PyResult<Self> {
+    pub fn new(name: String, remote_storage_url: Option<String>) -> PyResult<Self> {
         let (all_done_tx, all_done_rx) = channel(1);
         let all_done_tx = Arc::new(Mutex::new(all_done_tx));
 
-        let worker_process_fut = Box::pin(WorkerProcess::start(name.clone()))
-            as Pin<Box<dyn Future<Output = Result<WorkerProcess, DataFusionError>> + Send + Sync>>;
+        let worker_process_fut = match remote_storage_url {
+            None => Box::pin(WorkerProcess::start(name.clone()))
+                as Pin<Box<dyn Future<Output = Result<WorkerProcess, DataFusionError>> + Send + Sync>>,
+            Some(url) => {
+                let remote_state_store = FileSystemStateStorage::new(Arc::new(PrefixedLocalFileSystemStorage::new(url)), "state");
+                Box::pin(WorkerProcess::start_with_remote_file_system(name.clone(), Arc::new(remote_state_store)))
+                    as Pin<Box<dyn Future<Output = Result<WorkerProcess, DataFusionError>> + Send + Sync>>
+            },
+        };
+
         let worker_process_state = WorkerProcessState::new(worker_process_fut);
 
         Ok(Self {
@@ -177,14 +187,45 @@ impl DFRayStreamingProcessorService {
         wait_for_future(py, worker_process.start_task(task_definition, initial_scheduling_details))
             .to_py_err()?;
 
-        // debug!(
-        //     "{} Received New Plan: Stage:{} my addr: {}, output address map:\n{:?}\nplan:\nTODO",
-        //     self.name,
-        //     stage_id,
-        //     self.addr()?,
-        //     output_stream_address_map,
-        //     // display_plan_with_partition_counts(&plan)
-        // );
+        Ok(())
+    }
+
+    pub fn start_task_from(
+        &self,
+        py: Python,
+        task_bytes: &[u8],
+        initial_scheduling_details_bytes: &[u8],
+        checkpoint_number: usize,
+    ) -> PyResult<()> {
+        let worker_process = self.worker_process.expect_started()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(
+                format!("Worker process is still starting {e}"),
+            ))?;
+
+        let reader = flexbuffers::Reader::get_root(task_bytes)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(
+                format!("Failed to parse task bytes: {e}"),
+            ))?;
+        let task_definition = TaskDefinition2::deserialize(reader)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(
+                format!("Failed to deserialize task definition: {e}"),
+            ))?;
+
+        let reader = flexbuffers::Reader::get_root(initial_scheduling_details_bytes)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(
+                format!("Failed to parse scheduling details bytes: {e}"),
+            ))?;
+        let initial_scheduling_details = InitialSchedulingDetails::deserialize(reader)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyException, _>(
+                format!("Failed to deserialize task definition: {e}"),
+            ))?;
+
+        wait_for_future(py, worker_process.start_task_from(
+            task_definition,
+            initial_scheduling_details,
+            checkpoint_number,
+        ))
+            .to_py_err()?;
 
         Ok(())
     }

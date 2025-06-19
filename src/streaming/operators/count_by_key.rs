@@ -5,49 +5,90 @@ use crate::streaming::operators::utils::fiber_stream::{FiberStream, SingleFiberS
 use crate::streaming::partitioning::PartitionRange;
 use crate::streaming::runtime::Runtime;
 use crate::streaming::state::state::RocksDBStateBackend;
+use arrow_array::cast::AsArray;
+use arrow_array::types::UInt64Type;
 use async_trait::async_trait;
-use datafusion::common::{internal_datafusion_err, record_batch, DataFusionError};
+use datafusion::common::{internal_datafusion_err, record_batch, DataFusionError, ScalarValue};
+use datafusion::logical_expr::ColumnarValue;
+use datafusion::physical_expr::expressions::col;
 use eyeball::{AsyncLock, SharedObservable};
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use arrow_array::RecordBatch;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct CountStarOperator {}
+pub struct CountByKeyOperator {
+    key_col: String,
+}
 
-impl CountStarOperator {
-    pub fn new() -> Self {
-        CountStarOperator {}
+impl CountByKeyOperator {
+    pub fn new(key_col: String) -> Self {
+        CountByKeyOperator { key_col }
     }
 }
 
-impl CreateOperatorFunction2 for CountStarOperator {
+impl CreateOperatorFunction2 for CountByKeyOperator {
     fn create_operator_function(&self) -> Box<dyn OperatorFunction2 + Sync + Send> {
-        Box::new(CountStarFunction::new())
+        Box::new(CountByKeyFunction::new(self.key_col.clone()))
     }
 }
 
-struct CountStarFunction {
+struct CountByKeyFunction {
+    key_col: String,
     runtime: Option<Arc<Runtime>>,
     state: Option<Arc<Mutex<RocksDBStateBackend>>>,
-    local_count: u64,
+    local_counts: HashMap<u64, u64>,
     current_partition_range: Option<PartitionRange>,
 }
 
-impl CountStarFunction {
-    pub fn new() -> Self {
-        CountStarFunction {
+impl CountByKeyFunction {
+    pub fn new(key_col: String) -> Self {
+        CountByKeyFunction {
+            key_col,
             runtime: None,
             state: None,
             current_partition_range: None,
-            local_count: 0,
+            local_counts: HashMap::new(),
         }
+    }
+
+    fn update_local_counts(&mut self, record_batch: &RecordBatch) -> Result<CountStreamAction, DataFusionError> {
+        // Increment the local count. We can use a reference to self here as the
+        // stream is allowed to borrow from 'a.
+        let expr = col(&self.key_col, record_batch.schema_ref())?;
+        let result = expr.evaluate(&record_batch)?;
+        if result.data_type() != arrow_schema::DataType::UInt64 {
+            return Err(internal_datafusion_err!("Key column must be of type UInt64"));
+        }
+        
+        match result {
+            ColumnarValue::Array(arr) => {
+                let int_arr = arr.as_primitive::<UInt64Type>();
+                for value in int_arr.values() {
+                    let count = self.local_counts.entry(*value).or_insert(0);
+                    *count += 1;
+                }
+            },
+            ColumnarValue::Scalar(ScalarValue::UInt64(Some(value))) => {
+                self.local_counts
+                    .entry(value)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+            },
+            unsupported => {
+                return Err(internal_datafusion_err!("Unsupported columnar value {:?}", unsupported));
+            },
+        }
+        
+        Ok(CountStreamAction::RecordBatch)
     }
 }
 
 #[async_trait]
-impl OperatorFunction2 for CountStarFunction {
+impl OperatorFunction2 for CountByKeyFunction {
     async fn init(
         &mut self,
         runtime: Arc<Runtime>,
@@ -84,16 +125,19 @@ impl OperatorFunction2 for CountStarFunction {
                 .clone()
                 .ok_or(internal_datafusion_err!("Current partition range not set"))?;
             state.move_to_checkpoint(checkpoint, partition_range).await?;
-            self.local_count = match state.get("count")? {
-                None => 0,
-                Some(byte_vec) => {
-                    // Convert byte vector to u64
-                    let bytes: [u8; 8] = byte_vec.try_into()
-                        .map_err(|e| internal_datafusion_err!("State value for 'count' is not a valid u64: {:?}", e))?;
-                    u64::from_be_bytes(bytes)
-                }
-            };
-            println!("Loaded count from state: {}", self.local_count);
+
+            // Update the in memory view of the state from the db
+            self.local_counts = HashMap::new();
+
+            for entry in state.iterate() {
+                let (key, value) = entry?;
+                let key = u64::from_be_bytes(key.into_vec().try_into()
+                    .map_err(|e| internal_datafusion_err!("State key is not a valid u64: {:?}", e))?);
+                let value = u64::from_be_bytes(value.into_vec().try_into()
+                    .map_err(|e| internal_datafusion_err!("State value is not a valid u64: {:?}", e))?);
+                self.local_counts.insert(key, value);
+            }
+            println!("Loaded count from state: {:?}", self.local_counts);
         }
 
         Ok(())
@@ -111,17 +155,13 @@ impl OperatorFunction2 for CountStarFunction {
             // Append a marker to the stream to indicate the end of processing
             .chain(futures::stream::iter([Ok(None)]))
             .try_filter_map(move |item| {
-                let result = match item {
+                let action = match item {
                     Some(SItem::Generation(_generation)) => {
                         // TODO update the current partition range
                         Err(internal_datafusion_err!("CountStarOperator does not support generation items"))
                     },
                     Some(SItem::RecordBatch(record_batch)) => {
-                        // Increment the local count. We can use a reference to self here as the
-                        // stream is allowed to borrow from 'a.
-                        self.local_count += record_batch.num_rows() as u64;
-                        println!("Incrementing count to {}", self.local_count);
-                        Ok(CountStreamAction::RecordBatch)
+                        self.update_local_counts(&record_batch)
                     },
                     Some(SItem::Marker(marker)) => {
                         self.current_partition_range.clone()
@@ -129,13 +169,13 @@ impl OperatorFunction2 for CountStarFunction {
                             .map(|partition_range| {
                                 CountStreamAction::Marker {
                                     marker: marker.clone(),
-                                    local_count: self.local_count,
+                                    local_counts: self.local_counts.clone(),
                                     partition_range,
                                 }
                             })
                     },
                     None => Ok(CountStreamAction::EndOfStream {
-                        local_count: self.local_count,
+                        local_counts: self.local_counts.clone()
                     }),
                 };
 
@@ -143,22 +183,35 @@ impl OperatorFunction2 for CountStarFunction {
                 // easier to manage
                 let state = state.clone();
                 async move {
-                    match result? {
+                    match action? {
                         // Don't emit anything for RecordBatch
                         CountStreamAction::RecordBatch => Ok(None),
-                        CountStreamAction::Marker { marker, local_count, partition_range } => {
+                        CountStreamAction::Marker { marker, local_counts, partition_range } => {
                             // Store the count in the state backend
                             let mut state = state.lock().await;
-                            state.put("count", local_count.to_be_bytes())?;
+                            for (key, local_count) in local_counts.iter() {
+                                // Store each count for the key
+                                state.put(key.to_be_bytes(), local_count.to_be_bytes())?;
+                            }
                             state.checkpoint(marker.checkpoint_number as usize, partition_range).await?;
+
                             // Pass the marker downstream
                             Ok(Some(SItem::Marker(marker)))
                         },
-                        CountStreamAction::EndOfStream { local_count } => {
+                        CountStreamAction::EndOfStream { local_counts } => {
+                            let mut key_builder = Vec::with_capacity(local_counts.len());
+                            let mut value_builder = Vec::with_capacity(local_counts.len());
+                            for (key, count) in local_counts.iter() {
+                                key_builder.push(*key);
+                                value_builder.push(*count);
+                            }
+
                             // Emit the final count as a single item
                             let record_batch = record_batch!(
-                                ("count", UInt64, vec![local_count])
+                                ("key", UInt64, key_builder),
+                                ("count", UInt64, value_builder)
                             )?;
+
                             println!("Returning final count: {:?}", record_batch);
                             Ok(Some(SItem::RecordBatch(record_batch)))
                         },
@@ -183,10 +236,10 @@ enum CountStreamAction {
     RecordBatch,
     Marker{
         marker: Marker,
-        local_count: u64,
+        local_counts: HashMap<u64, u64>,
         partition_range: PartitionRange,
     },
     EndOfStream {
-        local_count: u64,
+        local_counts: HashMap<u64, u64>,
     },
 }

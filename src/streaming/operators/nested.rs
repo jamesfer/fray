@@ -67,13 +67,14 @@ impl OperatorFunction2 for NestedOperatorFunction {
     async fn init(
         &mut self, 
         runtime: Arc<Runtime>,
-        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
+        _state_id: &str,
     ) -> Result<(), DataFusionError> {
         self.operator_functions.iter_mut()
-            .map(|(_, op)| {
+            .map(|(def, op)| {
                 let runtime = runtime.clone();
                 let scheduling_details = scheduling_details.clone();
-                async move { op.init(runtime, scheduling_details).await }
+                async move { op.init(runtime, scheduling_details, &def.state_id).await }
             })
             .collect::<FuturesUnordered<_>>()
             .try_collect::<()>()
@@ -262,7 +263,7 @@ mod tests {
         ));
 
         let mut nested_func = nested.create_operator_function();
-        nested_func.init(runtime.clone(), scheduling_details.clone()).await.unwrap();
+        nested_func.init(runtime.clone(), scheduling_details.clone(), "state_id").await.unwrap();
         let outputs = nested_func.run(vec![]).await.unwrap();
 
         let output_values = outputs.into_iter()
@@ -358,7 +359,7 @@ mod tests {
         ));
 
         let mut nested_func = nested.create_operator_function();
-        nested_func.init(runtime.clone(), scheduling_details.clone()).await.unwrap();
+        nested_func.init(runtime.clone(), scheduling_details.clone(), "state_id").await.unwrap();
 
         let input_stream = iter(vec![Ok(SItem::RecordBatch(batch1.clone())), Ok(SItem::RecordBatch(batch2.clone()))]);
         let outputs = nested_func.run(vec![(0, Box::new(SingleFiberStream::new(input_stream)))]).await.unwrap();

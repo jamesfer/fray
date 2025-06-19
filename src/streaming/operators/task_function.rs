@@ -59,6 +59,15 @@ pub enum SItem {
     Generation(usize),
 }
 
+impl From<StreamItem> for SItem {
+    fn from(item: StreamItem) -> Self {
+        match item {
+            StreamItem::RecordBatch(batch) => SItem::RecordBatch(batch),
+            StreamItem::Marker(marker) => SItem::Marker(marker),
+        }
+    }
+}
+
 pub enum UpdateGenerationError {
     // A stream id or partition the operator is using didn't appear in the generation spec.
     // This is probably not recoverable
@@ -75,7 +84,8 @@ pub trait OperatorFunction2 {
     async fn init(
         &mut self, 
         runtime: Arc<Runtime>,
-        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
+        state_id: &str,
     ) -> Result<(), DataFusionError>;
     
     // Called each time the generations or input details are updated. Is called before the operator
@@ -139,9 +149,10 @@ impl OperatorFunction2 for Box<dyn OperatorFunction2 + Sync + Send> {
     async fn init(
         &mut self, 
         runtime: Arc<Runtime>,
-        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>
+        scheduling_details: SharedObservable<(Option<Vec<GenerationSpec>>, Option<Vec<GenerationInputDetail>>), AsyncLock>,
+        state_id: &str,
     ) -> Result<(), DataFusionError> {
-        self.as_mut().init(runtime, scheduling_details).await
+        self.as_mut().init(runtime, scheduling_details, state_id).await
     }
 
     async fn load(&mut self, checkpoint: usize) -> Result<(), DataFusionError> {

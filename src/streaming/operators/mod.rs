@@ -11,3 +11,4 @@ pub mod operator;
 pub mod remote_source;
 pub mod remote_exchange;
 pub mod count_star;
+pub mod count_by_key;
